@@ -1,9 +1,8 @@
 # Weekly Progress
 
 ## Week 1
-- Finished project setup
-- Defined milestones
+- xxx
 
 ## Week 2
-- Implemented module A
-- Started testing
+- xxx
+- xxx
