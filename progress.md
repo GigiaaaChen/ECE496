@@ -1,13 +1,12 @@
-# Team
-| Role               | Name                 | UofT Email |
-| ------------------ | -------------------- | ---------- |
-| Software Developer | Jijia (Georgia) Chen | [georgia.chen@mail.utoronto.ca](georgia.chen@mail.utoronto.ca)|
-# Deadlines
+# Important Deadlines
 | Name             | Date                              |
 | ---------------- | --------------------------------- |
+| Internal presentation meeting | September 20th 16:00 |
 | Proposal Meeting | September 22nd 16:10 through Zoom |
-# Weekly Progress
+| Internal proposal document deadline | September 23rd 11:00-12:00 |
+| Meeting with Professor Rose | September 24th 13:00-14:00 |
 
+# Weekly Progress
 
 ## Week 3 September 21th - 27th
 
@@ -18,6 +17,8 @@
     - Script and content revised
     - Proposal responsibilities divided
     - Next internal meeting set: Sep 20th 16:00 hybrid (North York Center Toronto Public Library or through Zoom)
+        - To run through the proposal meeting presentation, and be prepared for questions.
+        - Discuss if there are any problems with the proposal document.
 ### Proposal report responsibilities
 | Name | Responsibilities |
 | ---- | ---------------- |
