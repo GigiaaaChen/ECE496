@@ -2,13 +2,14 @@
 ECE496 Project YaY:)
 
 # Team
-| Role               | Name                 | UofT Email |
-| ------------------ | -------------------- | ---------- |
-| Software Engineer I| Jijia (Georgia) Chen | <georgia.chen@mail.utoronto.ca>|
-| Software Engineer II| Xindi Hu             | <xindihu.hu@mail.utoronto.ca>|
-| Mechanical & Software Engineer III| Kyna Wu | <kyna.wu@mail.utoronto.ca>|
-| Hardware Design Engineer | Yilei (Caroline) Wang | <carolineyl.wang@mail.utoronto.ca>|
+| Name                 | UofT Email |
+| -------------------- | ---------- |
+| Jijia (Georgia) Chen | <georgia.chen@mail.utoronto.ca>|
+| Xindi Hu             | <xindihu.hu@mail.utoronto.ca>|
+| Yilei (Caroline) Wang | <carolineyl.wang@mail.utoronto.ca>|
+| Kyna Wu | <kyna.wu@mail.utoronto.ca>|
 
+<!-->
 # Responsibilities
 
 ## Software Engineer I
@@ -29,7 +30,7 @@ ECE496 Project YaY:)
 ## Hardware Design Engineer
 - [ ] Design custom PCB for remote controller
 - [ ] Build and test circuits for communication
-
+-->
 # Design Docs
 This table stores all design documents we wrote during the development of the project.
 | Document | Details | Status <WIP/Implemented/Archived> |
