@@ -9,7 +9,7 @@ ECE496 Project YaY:)
 | Yilei (Caroline) Wang | <carolineyl.wang@mail.utoronto.ca>|
 | Kyna Wu | <kyna.wu@mail.utoronto.ca>|
 
-<!-->
+<!--
 # Responsibilities
 
 ## Software Engineer I
