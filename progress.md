@@ -1,15 +1,38 @@
 # Important Deadlines
 | Name             | Date                              |
 | ---------------- | --------------------------------- |
-| Internal presentation meeting | September 20th 16:00 |
 | Proposal Meeting | September 22nd 16:10 through Zoom |
-| Internal proposal document deadline | September 23rd 11:00-12:00 |
-| Meeting with Professor Rose | September 24th 13:00-14:00 |
+| Proposal Deadline | October 1st 23:59 |
+| CI Meeting for Proposal Document | October 3rd 17:30-18:00 |
+| Final Proposal Document Due | October 18th 23:59 |
+| Implementation Plan | November 8th 23:59 |
+| Interim Demo | November 16th - 29th |
 
 # Weekly Progress
+## Week 5 October 5th - 11th
+
+## Week 4 September 28th - October 4th
+- Placed order for robotic arm
+- Disassembled existing phone remote controller and started reverse engineering
+- Started research and setup of head detection AI architecture
+- Received proposal document feedback from CI Megan Harris, started editing.
+| Name | Responsibilities |
+| ---- | ---------------- |
+| Georgia | Background, Motivation, Goal, Conclusion |
+| Xindi | Cover Page, Executive Summary, Introduction, Problem Statement |
+| Kyna | System Block Diagram, Risk Assessment |
+| Caroline | Requirement |
 
 ## Week 3 September 21th - 27th
-
+- Internal Proposal Deadline: September 25th
+- Internal Proposal Revision Deadline: September 28th
+- Internal Proposal Cross-Editing Deadline set: September 29th
+| Name | Responsibilities |
+| ---- | ---------------- |
+| Georgia | Cover Page, Executive Summary, Introduction, Problem Statement |
+| Xindi | Background, Motivation, Goal, Conclusion |
+| Kyna | Requirement |
+| Caroline | System Block Diagram, Risk Assessment |
 
 ## Week 2 September 14th - 20th
 - Internal Proposal Presentation Meeting: September 14th 11:00 through Zoom
