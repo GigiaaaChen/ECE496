@@ -35,13 +35,13 @@ ax.plot_surface(x_cyl, y_cyl, z_cyl, color='gray', alpha=0.8)
 
 # ---------- Arm Parameters ----------
 base_x, base_y, base_z = 1.0, 0.0, cyl_h   # base on top of stand
-L2, L3, L4 = 0.25, 0.20, 0.05
+L2, L3, L4 = 0.20, 0.20, 0.10   # 修改: 三段臂长，总长约0.5m (符合直径1m工作空间)
 
 # Joint ranges
-t1_vals = np.linspace(-np.pi, np.pi, 12)      # yaw
-t2_vals = np.linspace(-np.pi/2, np.pi/2, 9)   # shoulder
-t3_vals = np.linspace(-np.pi/2, np.pi/2, 9)   # elbow
-t4_vals = np.linspace(-np.pi/2, np.pi/2, 7)   # wrist
+t1_vals = np.linspace(-np.pi, np.pi, 12)      # yaw (360°)
+t2_vals = np.linspace(-np.pi/2, np.pi/2, 9)   # shoulder (±90°)
+t3_vals = np.linspace(-1.11, np.pi, 9)        # 修改: elbow -63.7° ~ +180°
+t4_vals = np.linspace(1.08, 5.20, 7)          # 修改: wrist (手腕模式) 62° ~ 298°
 
 # ---------- Compute reachable points ----------
 pts = []
@@ -64,16 +64,16 @@ for t1 in t1_vals:
 pts = np.array(pts)
 
 # ---------- Plot reachable workspace ----------
-# ax.scatter(pts[:,0], pts[:,1], pts[:,2], s=5, c='blue', alpha=0.5)
+# 打开点云显示
+ax.scatter(pts[:,0], pts[:,1], pts[:,2], s=5, c='blue', alpha=0.5)
 
 # ---------- Reachable workspace as a sphere ----------
 u, v = np.mgrid[0:2*np.pi:40j, 0:np.pi:20j]
-r = 0.5   # Max reach r
+r = 0.5   # 修改: Max reach = 0.5m (半径), 工作空间直径1m
 x = r*np.cos(u)*np.sin(v) + base_x
 y = r*np.sin(u)*np.sin(v) + base_y
 z = r*np.cos(v) + base_z
 ax.plot_surface(x, y, z, color='blue', alpha=0.2)
-
 
 # ---------- Labels ----------
 ax.set_xlabel("X (m)")
@@ -86,6 +86,5 @@ ax.text(0.5, 0.0, 0.9+0.15, "Head", color='cyan', fontsize=12)        # head lab
 ax.text(0.5, 0.0, 0.0, "Sofa", color='brown', fontsize=12)            # sofa label
 ax.text(1.05, 0.0, 1.0, "Stand", color='gray', fontsize=12)           # stand label
 ax.text(base_x+0.5, base_y, base_z+0.5, "Arm Reachable space", color='blue', fontsize=12)  # reachable space
-
 
 plt.show()
