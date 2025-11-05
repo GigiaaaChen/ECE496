@@ -1,3 +1,5 @@
+// 测试能不能读到连接的I2C device
+
 #include <Wire.h>
 
 #define SDA_PIN 21
