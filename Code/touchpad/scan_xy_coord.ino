@@ -1,3 +1,4 @@
+// 记录手指的xy坐标
 #include <Wire.h>
 
 #define I2C_ADDR 0x74      // 你扫到的地址
