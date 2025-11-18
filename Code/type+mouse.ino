@@ -63,7 +63,7 @@ void hardResetTP() {
 }
 
 // ===== 参数：灵敏度/阈值/限幅 =====
-const int MOVE_DIV = 30;     // 越小越灵敏（dx/MOVE_DIV）
+const int MOVE_DIV = 60;     // 越小越灵敏（dx/MOVE_DIV）
 const int MOVE_CAP = 7;      // 每次发送的最大步进
 const int MOTION_THRESH = 8; // 触发移动的最小位移
 
@@ -142,8 +142,7 @@ void loop() {
                 if (my >  MOVE_CAP) my =  MOVE_CAP;
                 if (my < -MOVE_CAP) my = -MOVE_CAP;
 
-                // 若 Y 方向感觉反了，解注释下一行（或删掉反向）
-                my = -my;
+                // my = -my;
 
                 // 发送鼠标移动（相对位移）；该库常用 API：move(x, y)
                 bleMouse.move((int8_t)mx, (int8_t)my);
