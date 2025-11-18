@@ -1,8 +1,9 @@
 #include <Wire.h>
-#include <BleKeyboard.h>
+#include <BleCombo.h>  // 你的库：ESP32_BLE_Combo_Keyboard_Mouse
 
-// ---------- BLE 键盘（保持和你原来一样） ----------
-BleKeyboard bleKeyboard("ESP32-Keyboard", "Espressif", 100);
+// ---------- BLE 合体设备（先键盘，再让鼠标附着在键盘上） ----------
+BleComboKeyboard bleKeyboard("HeadsUp-Remote", "Espressif", 100);
+BleComboMouse    bleMouse(&bleKeyboard);   // 关键：把键盘指针传给鼠标
 int buttonPin = 0; // BOOT 按键，按下 = LOW
 
 // ---------- 触控板 IQS5xx 定义 ----------
@@ -25,7 +26,7 @@ uint16_t lastX = 0;
 uint16_t lastY = 0;
 bool haveLast = false;
 
-// ---------- IQS5xx I2C helper ----------
+// ===== IQS5xx I2C helpers =====
 bool iqs_read(uint16_t reg, uint8_t* buf, uint8_t len) {
   Wire.beginTransmission((uint8_t)I2C_ADDR);
   Wire.write((uint8_t)(reg >> 8));
@@ -61,15 +62,19 @@ void hardResetTP() {
   delay(50);
 }
 
-// ---------- setup ----------
+// ===== 参数：灵敏度/阈值/限幅 =====
+const int MOVE_DIV = 30;     // 越小越灵敏（dx/MOVE_DIV）
+const int MOVE_CAP = 7;      // 每次发送的最大步进
+const int MOTION_THRESH = 8; // 触发移动的最小位移
+
 void setup() {
   Serial.begin(115200);
   delay(200);
 
-  pinMode(buttonPin, INPUT_PULLUP); // BOOT 按键
+  pinMode(buttonPin, INPUT_PULLUP); // BOOT
   pinMode(LED_PIN, OUTPUT);
   pinMode(RST_PIN, OUTPUT);
-  pinMode(RDY_PIN, INPUT);          // 如果没接 RDY，可以改成 INPUT_PULLUP
+  pinMode(RDY_PIN, INPUT);          // 若未接，可换 INPUT_PULLUP
 
   // I2C
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -87,17 +92,20 @@ void setup() {
     Serial.println("未读到分辨率，继续使用原始坐标。");
   }
 
-  // 启动 BLE 键盘（和你原来一样）
+  // 启动 BLE（先键盘）
   bleKeyboard.begin();
-  Serial.println("BLE keyboard started, advertising as ESP32-Keyboard");
+  Serial.println("BLE HID started (keyboard+mouse), advertising as HeadsUp-Remote");
 }
 
-// ---------- loop ----------
 void loop() {
-  bool connected = bleKeyboard.isConnected();
+  bool connected = false;
+  // 某些分支把 isConnected() 放在键盘对象上：
+  #if defined(ARDUINO)
+    connected = bleKeyboard.isConnected();
+  #endif
 
-  // ===== 1. 读触控板，把位移变成方向键 =====
-  // 如果 RDY 引脚是低电平，表示没有新数据（如果你板子上是相反逻辑，可以把 LOW 改成 HIGH）
+  // ===== 1) 读触控板 → 发送鼠标移动，同时点亮 LED =====
+  // 如果 RDY 为低表示没新数据（若你的板子相反，就把 != LOW 改成 == LOW）
   if (digitalRead(RDY_PIN) != LOW) {
     uint8_t nf = 0;
     if (iqs_read(REG_NUM_FINGERS, &nf, 1)) {
@@ -107,14 +115,15 @@ void loop() {
         bool oky = iqs_read_u16(REG_ABS_Y_F1, y);
 
         if (okx && oky) {
+          // 有有效触摸数据 → 点亮 LED
           digitalWrite(LED_PIN, HIGH);
-          // 串口看坐标
+
+          // 串口输出坐标
           Serial.print("Finger1: X="); Serial.print(x);
           Serial.print("  Y="); Serial.println(y);
 
           if (connected) {
             if (!haveLast) {
-              // 第一次触摸，只记录不移动
               lastX = x;
               lastY = y;
               haveLast = true;
@@ -122,47 +131,22 @@ void loop() {
               int16_t dx = (int16_t)x - (int16_t)lastX;
               int16_t dy = (int16_t)y - (int16_t)lastY;
 
-              // 只有移动超过阈值才触发
-              const int THRESH = 8;
-              if (dx > THRESH || dx < -THRESH || dy > THRESH || dy < -THRESH) {
-
-                int stepsX = dx / 30;  // 调这个缩放系数可以改变灵敏度
-                int stepsY = dy / 30;
+              if (abs(dx) > MOTION_THRESH || abs(dy) > MOTION_THRESH) {
+                // 缩放成鼠标相对位移
+                int mx = dx / MOVE_DIV;
+                int my = dy / MOVE_DIV;
 
                 // 限幅
-                if (stepsX > 5) stepsX = 5;
-                if (stepsX < -5) stepsX = -5;
-                if (stepsY > 5) stepsY = 5;
-                if (stepsY < -5) stepsY = -5;
+                if (mx >  MOVE_CAP) mx =  MOVE_CAP;
+                if (mx < -MOVE_CAP) mx = -MOVE_CAP;
+                if (my >  MOVE_CAP) my =  MOVE_CAP;
+                if (my < -MOVE_CAP) my = -MOVE_CAP;
 
-                // Y 方向如果觉得反了，可以注释掉下一行或改成 stepsY = -stepsY;
-                stepsY = -stepsY;
+                // 若 Y 方向感觉反了，解注释下一行（或删掉反向）
+                my = -my;
 
-                // X 方向 → 左右方向键
-                if (stepsX > 0) {
-                  for (int i = 0; i < stepsX; i++) {
-                    bleKeyboard.write(KEY_RIGHT_ARROW);
-                    delay(5);
-                  }
-                } else if (stepsX < 0) {
-                  for (int i = 0; i < -stepsX; i++) {
-                    bleKeyboard.write(KEY_LEFT_ARROW);
-                    delay(5);
-                  }
-                }
-
-                // Y 方向 → 上下方向键
-                if (stepsY > 0) {
-                  for (int i = 0; i < stepsY; i++) {
-                    bleKeyboard.write(KEY_DOWN_ARROW);
-                    delay(5);
-                  }
-                } else if (stepsY < 0) {
-                  for (int i = 0; i < -stepsY; i++) {
-                    bleKeyboard.write(KEY_UP_ARROW);
-                    delay(5);
-                  }
-                }
+                // 发送鼠标移动（相对位移）；该库常用 API：move(x, y)
+                bleMouse.move((int8_t)mx, (int8_t)my);
 
                 lastX = x;
                 lastY = y;
@@ -170,6 +154,7 @@ void loop() {
             }
           }
         } else {
+          // 读失败 → 熄灭
           digitalWrite(LED_PIN, LOW);
         }
       } else {
@@ -183,12 +168,12 @@ void loop() {
     iqs_write1(REG_END_WINDOW, 0x00);
   }
 
-  // ===== 2. 保持你原来的 BOOT → 发送 'A' 功能 =====
+  // ===== 2) BOOT 键发送 'A'（键盘） =====
   if (connected) {
     if (digitalRead(buttonPin) == LOW) {
-      Serial.println("BOOT pressed, sending A...");
-      bleKeyboard.print("A");
-      delay(500); // 简单防抖
+      Serial.println("BOOT pressed, sending 'A'...");
+      bleKeyboard.print("A"); // 你的库没有 KEY_A，用 print 最稳
+      delay(500); // 简易防抖
     }
   }
 
