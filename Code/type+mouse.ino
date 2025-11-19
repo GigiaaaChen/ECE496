@@ -3,7 +3,9 @@
 #include <esp_sleep.h>    // 深度睡眠
 
 // ===== BLE 组合设备：先键盘，再把鼠标关联上 =====
-BleComboKeyboard bleKB("HeadsUp-Remote KBM v5", "Espressif", 100);
+// Primary HID Device & Secondary HID Report
+// 由bluCombo lib决定的 mouse必须要挂在primary device上才行
+BleComboKeyboard bleKB("HeadsUp-Remote KBM v5", "Caroline-496-remote", 100); //100 -> BLE 在建立连接后，会周期性地交换数据 100 = 125ms //可作为灵敏度调节参数之后调小点
 BleComboMouse    bleMouse(&bleKB);
 
 // ===== 引脚 / I2C 地址 =====
@@ -38,22 +40,31 @@ uint16_t lastX = 0, lastY = 0;
 bool haveLast = false;
 
 // ===== I2C helpers =====
+// iqs = IQS5xx 是触控板上的芯片
+// 读iqs里面的register，given address和存结果的buf以及读取长度len
 static bool iqs_read(uint16_t reg, uint8_t* buf, uint8_t len) {
+  // wire是打包好I2Ccommunication的API
   Wire.beginTransmission((uint8_t)I2C_ADDR);
+  // IQS5xx 使用 16-bit 的寄存器地址，而 I2C 一次只能发送 8-bit（1 字节）
   Wire.write((uint8_t)(reg >> 8));
   Wire.write((uint8_t)(reg & 0xFF));
+  // 如果地址写成功了，那 request这个地址里的数据
   if (Wire.endTransmission(false) != 0) return false;
   uint8_t n = Wire.requestFrom((uint8_t)I2C_ADDR, (uint8_t)len);
   if (n != len) return false;
   for (uint8_t i = 0; i < len; i++) buf[i] = Wire.read();
   return true;
 }
+
+// 把上面的function进一步封装，把两个byte合成一个 16bit的 存在out里
 static bool iqs_read_u16(uint16_t reg, uint16_t &out) {
   uint8_t b[2];
   if (!iqs_read(reg, b, 2)) return false;
   out = ((uint16_t)b[0] << 8) | b[1];
   return true;
 }
+
+//向 IQS5xx 芯片的 某个寄存器 写入一个 8-bit 的值
 static bool iqs_write1(uint16_t reg, uint8_t val) {
   Wire.beginTransmission((uint8_t)I2C_ADDR);
   Wire.write((uint8_t)(reg >> 8));
@@ -61,6 +72,8 @@ static bool iqs_write1(uint16_t reg, uint8_t val) {
   Wire.write(val);
   return Wire.endTransmission(true) == 0;
 }
+
+// 它通过硬件 RESET 引脚，把触控芯片（IQS5xx）重置（重新启动）一次
 static void hardResetTP() {
   pinMode(RST_PIN, OUTPUT);
   digitalWrite(RST_PIN, LOW);
@@ -113,22 +126,29 @@ void handlePowerButton(bool bleConnected) {
   btnPrev = pressed;
 }
 
+
+
+/************************************************* Set up *************************************************/
+
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200);             // debug console 在Arduino IDE的serial monitor里可以看到我的print statement
   delay(100);
 
   pinMode(LED_PIN, OUTPUT);
   pinMode(RST_PIN, OUTPUT);
   pinMode(RDY_PIN, INPUT);          // 如需上拉可改 INPUT_PULLUP
-  pinMode(BUTTON_BOOT, INPUT_PULLUP);
+  pinMode(BUTTON_BOOT, INPUT_PULLUP); // NPUT_PULLUP = 输入 + 内部上拉到 3.3V。     按钮没按时读 HIGH，按下时读 LOW。
 
-  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.begin(SDA_PIN, SCL_PIN);     // 初始化 I2C 总线; 告诉 ESP32：“我现在要用 SDA_PIN（21）、SCL_PIN（22）作为 I2C 的 SDA / SCL。”
   Wire.setClock(100000);
-  hardResetTP();
+  hardResetTP();                    // 初始化触控板的芯片
 
-  bleKB.begin();
+  bleKB.begin();                    // 启动 BLE（作为键盘设备: 打开 BLE radio, 建立 HID（Human Interface Device） 服务, 注册键盘报告, 广播 BLE 名称
   Serial.println("BLE Combo (Keyboard+Mouse) started; BOOT long-press=Power, short-press=type 'A'");
 }
+
+
+/************************************************* Main *************************************************/
 
 void loop() {
   bool connected = bleKB.isConnected();
@@ -140,7 +160,7 @@ void loop() {
     // 手势：SINGLE_TAP → 左键点击
     uint8_t ge0 = 0;
     if (iqs_read(REG_GESTURE_EVENTS0, &ge0, 1)) {
-      anyData = true;
+      anyData = true; // 用来控制LED
       if (ge0 & (1 << 0)) { // SINGLE_TAP
         if (connected) bleMouse.click(MOUSE_LEFT);
         Serial.println("[gesture] SINGLE_TAP -> left click");
@@ -149,8 +169,10 @@ void loop() {
 
     // 坐标 → 鼠标移动
     uint8_t nf = 0;
-    if (iqs_read(REG_NUM_FINGERS, &nf, 1)) {
+    if (iqs_read(REG_NUM_FINGERS, &nf, 1)) { 
+      // 只有一只以及以上的 手指数量 在触控板上 才算有效
       if (nf > 0) {
+        // 读xy坐标
         uint16_t x=0, y=0;
         bool okx = iqs_read_u16(REG_ABS_X_F1, x);
         bool oky = iqs_read_u16(REG_ABS_Y_F1, y);
@@ -170,6 +192,7 @@ void loop() {
               if (my < -MOVE_CAP) my = -MOVE_CAP;
               if (INVERT_Y) my = -my;
 
+              // 发送鼠标移动 （而非绝对坐标） 
               if (connected) bleMouse.move((int8_t)mx, (int8_t)my);
               lastX = x; lastY = y;
             }
