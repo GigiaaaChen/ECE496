@@ -5,11 +5,11 @@ from openvino.runtime import Core
 
 # ---- model paths ----
 #Face detection CNN: extract face features, outputs mny bounding box candidates, each with the confidence score
-FD_XML = r"C:\Users\16043\Desktop\ECE496\open_model_zoo\intel\face-detection-retail-0004\FP16\face-detection-retail-0004.xml"
+FD_XML = r"C:\Users\16043\Desktop\ECE496_OpenSource\open_model_zoo\intel\face-detection-retail-0004\FP16\face-detection-retail-0004.xml"
 #Head pose detection CNN: extract face features pass into yaw pitch and roll, using regression to output 3 numbers
-HP_XML = r"C:\Users\16043\Desktop\ECE496\open_model_zoo\intel\head-pose-estimation-adas-0001\FP16\head-pose-estimation-adas-0001.xml"
+HP_XML = r"C:\Users\16043\Desktop\ECE496_OpenSource\open_model_zoo\intel\head-pose-estimation-adas-0001\FP16\head-pose-estimation-adas-0001.xml"
 #Face landmarks CNN: extract face features output x,y coordinates
-LM_XML = r"C:\Users\16043\Desktop\ECE496\open_model_zoo\intel\landmarks-regression-retail-0009\FP16\landmarks-regression-retail-0009.xml"
+LM_XML = r"C:\Users\16043\Desktop\ECE496_OpenSource\open_model_zoo\intel\landmarks-regression-retail-0009\FP16\landmarks-regression-retail-0009.xml"
 
 core = Core()
 
