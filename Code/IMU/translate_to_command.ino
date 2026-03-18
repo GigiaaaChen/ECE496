@@ -1,14 +1,11 @@
 #include <Wire.h>
+#include <math.h>
 
-/* ========= I2C 引脚 ========= */
 #define SDA_PIN 22
 #define SCL_PIN 23
 
-/* ========= MPU6050 I2C 地址 ========= */
 #define MPU_ADDR 0x68
 
-/* ========= MPU6050 寄存器地址 ========= */
-#define REG_WHO_AM_I     0x75
 #define REG_PWR_MGMT_1   0x6B
 #define REG_SMPLRT_DIV   0x19
 #define REG_CONFIG       0x1A
@@ -16,14 +13,26 @@
 #define REG_ACCEL_CONFIG 0x1C
 #define REG_ACCEL_XOUT_H 0x3B
 
-/* ========= 量程选择（本代码固定用：Accel ±2g, Gyro ±250 dps） =========
-   Accel sensitivity: 16384 LSB/g  (±2g)
-   Gyro  sensitivity: 131   LSB/(°/s) (±250 dps)
-*/
+// 加速度计灵敏度：±2g 对应 16384 LSB/g
 const float ACC_LSB_PER_G = 16384.0f;
-const float GYR_LSB_PER_DPS = 131.0f;
 
-/* ========= 小工具：写 8-bit 寄存器 ========= */
+// 进入动作的角度阈值（对称使用 ±ANGLE_ENTER）
+const float ANGLE_ENTER = 10.0f;   // 超过 10° 认为有动作
+// 角度低通滤波系数
+const float ALPHA_ANGLE = 0.15f;
+// 小死区：小于这个角度直接当 0，减少抖动
+const float SMALL_DEADBAND = 2.0f;
+
+float baseRoll = 0.0f;
+float basePitch = 0.0f;
+
+float rollFilt = 0.0f;
+float pitchFilt = 0.0f;
+
+// 仅用于内部逻辑的记忆（当前方向）
+String lastCmd = "STOP";
+
+// ========== I2C 写一个字节 ==========
 bool mpuWriteByte(uint8_t reg, uint8_t data) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
@@ -32,22 +41,7 @@ bool mpuWriteByte(uint8_t reg, uint8_t data) {
   return (err == 0);
 }
 
-/* ========= 小工具：读 8-bit 寄存器 ========= */
-bool mpuReadByte(uint8_t reg, uint8_t &out) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) {
-    return false;
-  }
-  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)1);
-  if (Wire.available()) {
-    out = Wire.read();
-    return true;
-  }
-  return false;
-}
-
-/* ========= 小工具：读一段连续寄存器 ========= */
+// ========== I2C 连续读多个字节 ==========
 bool mpuReadBytes(uint8_t startReg, uint8_t *buf, uint8_t len) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(startReg);
@@ -63,99 +57,118 @@ bool mpuReadBytes(uint8_t startReg, uint8_t *buf, uint8_t len) {
   return (i == len);
 }
 
-/* ========= I2C 扫描 ========= */
-void i2cScanOnce() {
-  Serial.println("Scanning I2C bus...");
-  Serial.println();
-
-  int devices = 0;
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    uint8_t err = Wire.endTransmission(true);
-    if (err == 0) {
-      Serial.println("Found device at:");
-      Serial.println(addr, HEX);
-      Serial.println();
-      devices++;
-    }
-    delay(5);
-  }
-
-  Serial.println("Scan done. Devices count:");
-  Serial.println(devices);
-  Serial.println();
-}
-
-/* ========= MPU6050 初始化 ========= */
+// ========== 初始化 MPU6050 ==========
 bool mpuInit() {
-  Serial.println("Initializing MPU6050...");
-  Serial.println();
-
-  // 1) 唤醒：PWR_MGMT_1 = 0x00（清 sleep）
-  if (!mpuWriteByte(REG_PWR_MGMT_1, 0x00)) {
-    Serial.println("❌ Write PWR_MGMT_1 failed");
-    Serial.println();
-    return false;
-  }
+  if (!mpuWriteByte(REG_PWR_MGMT_1, 0x00)) return false;
   delay(100);
 
-  // 2) 采样率分频：SMPLRT_DIV
-  // Sample Rate = Gyro Output Rate / (1 + SMPLRT_DIV)
-  // Gyro Output Rate 通常为 8kHz 或 1kHz（受 DLPF 影响）
-  // 这里先设置成 0x07，常见、稳定
-  if (!mpuWriteByte(REG_SMPLRT_DIV, 0x07)) {
-    Serial.println("❌ Write SMPLRT_DIV failed");
-    Serial.println();
-    return false;
-  }
+  if (!mpuWriteByte(REG_SMPLRT_DIV, 0x07)) return false;
+  if (!mpuWriteByte(REG_CONFIG, 0x06)) return false;
 
-  // 3) DLPF：CONFIG（低通滤波）
-  // 0x06 是常用选项之一（更平滑一些）
-  if (!mpuWriteByte(REG_CONFIG, 0x06)) {
-    Serial.println("❌ Write CONFIG failed");
-    Serial.println();
-    return false;
-  }
+  if (!mpuWriteByte(REG_GYRO_CONFIG, 0x00)) return false;   // Gyro ±250 dps
+  if (!mpuWriteByte(REG_ACCEL_CONFIG, 0x00)) return false;  // Accel ±2g
 
-  // 4) 陀螺仪量程：±250 dps -> GYRO_CONFIG = 0x00
-  if (!mpuWriteByte(REG_GYRO_CONFIG, 0x00)) {
-    Serial.println("❌ Write GYRO_CONFIG failed");
-    Serial.println();
-    return false;
-  }
-
-  // 5) 加速度量程：±2g -> ACCEL_CONFIG = 0x00
-  if (!mpuWriteByte(REG_ACCEL_CONFIG, 0x00)) {
-    Serial.println("❌ Write ACCEL_CONFIG failed");
-    Serial.println();
-    return false;
-  }
-
-  Serial.println("✅ MPU6050 init done");
-  Serial.println();
   return true;
 }
 
-/* ========= 读取 6 轴原始数据 ========= */
-bool readAccelGyroRaw(int16_t &ax, int16_t &ay, int16_t &az,
-                      int16_t &gx, int16_t &gy, int16_t &gz) {
-  uint8_t buf[14];
-
-  // 从 ACCEL_XOUT_H 连续读 14 bytes：
-  // AX(2) AY(2) AZ(2) TEMP(2) GX(2) GY(2) GZ(2)
-  if (!mpuReadBytes(REG_ACCEL_XOUT_H, buf, 14)) {
+// ========== 由加速度解算 roll / pitch（绝对角度，单位：度）==========
+bool readRollPitch(float &rollDeg, float &pitchDeg) {
+  uint8_t buf[6];
+  if (!mpuReadBytes(REG_ACCEL_XOUT_H, buf, 6)) {
     return false;
   }
 
-  ax = (int16_t)((buf[0] << 8) | buf[1]);
-  ay = (int16_t)((buf[2] << 8) | buf[3]);
-  az = (int16_t)((buf[4] << 8) | buf[5]);
+  int16_t ax_raw = (int16_t)((buf[0] << 8) | buf[1]);
+  int16_t ay_raw = (int16_t)((buf[2] << 8) | buf[3]);
+  int16_t az_raw = (int16_t)((buf[4] << 8) | buf[5]);
 
-  gx = (int16_t)((buf[8] << 8) | buf[9]);
-  gy = (int16_t)((buf[10] << 8) | buf[11]);
-  gz = (int16_t)((buf[12] << 8) | buf[13]);
+  float ax = ((float)ax_raw) / ACC_LSB_PER_G;
+  float ay = ((float)ay_raw) / ACC_LSB_PER_G;
+  float az = ((float)az_raw) / ACC_LSB_PER_G;
+
+  // roll：绕 X 轴左右倾斜
+  // pitch：绕 Y 轴前后倾斜
+  float roll  = atan2f(ay, az);
+  float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+
+  const float RAD2DEG = 57.2957795f;
+  rollDeg  = roll * RAD2DEG;
+  pitchDeg = pitch * RAD2DEG;
 
   return true;
+}
+
+// ========== 初始水平校准 ==========
+void calibrateLevel() {
+  Serial.println("Calibrating level, please keep board still and level...");
+  Serial.println();
+
+  const int N = 200;
+  float sumRoll = 0.0f;
+  float sumPitch = 0.0f;
+
+  for (int i = 0; i < N; i++) {
+    float r, p;
+    if (readRollPitch(r, p)) {
+      sumRoll += r;
+      sumPitch += p;
+    }
+    delay(10);
+  }
+
+  baseRoll = sumRoll / (float)N;
+  basePitch = sumPitch / (float)N;
+
+  rollFilt = 0.0f;
+  pitchFilt = 0.0f;
+
+  Serial.println("Calibration done. Base roll / pitch:");
+  Serial.println(baseRoll);
+  Serial.println(basePitch);
+  Serial.println();
+}
+
+// ========== 根据“相对水平角度”输出方向（已做 F↔R, B↔L 交换）==========
+String decideCommandFromAngles(float rollRel, float pitchRel) {
+  // 小死区：太小的值直接当 0，减少抖动
+  if (fabs(rollRel) < SMALL_DEADBAND) {
+    rollRel = 0.0f;
+  }
+  if (fabs(pitchRel) < SMALL_DEADBAND) {
+    pitchRel = 0.0f;
+  }
+
+  float ar = fabs(rollRel);
+  float ap = fabs(pitchRel);
+
+  // 两个方向都很小 -> STOP
+  if (ar < ANGLE_ENTER && ap < ANGLE_ENTER) {
+    return "STOP";
+  }
+
+  // 选绝对值更大的轴作为主方向
+  if (ap >= ar) {
+    // ✅ pitch 主导：前后倾
+    // 之前是：pitch>0 -> RIGHT, pitch<0 -> LEFT
+    // 现在反过来：pitch>0 -> LEFT, pitch<0 -> RIGHT
+    if (pitchRel >= ANGLE_ENTER) {
+      return "LEFT";
+    } else if (pitchRel <= -ANGLE_ENTER) {
+      return "RIGHT";
+    } else {
+      return "STOP";
+    }
+  } else {
+    // ✅ roll 主导：左右倾
+    // 保持不变：roll>0 -> FORWARD, roll<0 -> BACKWARD
+    if (rollRel >= ANGLE_ENTER) {
+      return "FORWARD";
+    } else if (rollRel <= -ANGLE_ENTER) {
+      return "BACKWARD";
+    } else {
+      return "STOP";
+    }
+  }
 }
 
 void setup() {
@@ -167,96 +180,56 @@ void setup() {
   Serial.println();
 
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(100000);   // 先用 100kHz，最稳
+  Wire.setClock(100000);
   delay(200);
 
-  /* 1) I2C Scan */
-  i2cScanOnce();
-
-  /* 2) WHO_AM_I */
-  Serial.println("Reading WHO_AM_I...");
-  Serial.println();
-
-  uint8_t whoami = 0;
-  if (mpuReadByte(REG_WHO_AM_I, whoami)) {
-    Serial.println("WHO_AM_I value:");
-    Serial.println(whoami, HEX);
-    Serial.println();
-
-    if (whoami == 0x68) {
-      Serial.println("✅ WHO_AM_I correct (0x68)");
-      Serial.println();
-    } else {
-      Serial.println("⚠️ WHO_AM_I unexpected");
-      Serial.println();
-    }
-  } else {
-    Serial.println("❌ Failed to read WHO_AM_I");
-    Serial.println();
-  }
-
-  /* 3) Init MPU6050 */
   if (!mpuInit()) {
-    Serial.println("Stopping due to init failure");
+    Serial.println("MPU init failed");
     Serial.println();
     while (1) {
       delay(1000);
     }
   }
 
-  Serial.println("Starting streaming AX AY AZ GX GY GZ...");
-  Serial.println("Units: accel in g, gyro in deg/s");
+  Serial.println("MPU init OK");
+  Serial.println();
+  calibrateLevel();
+
+  Serial.println("Tilt relative to level:");
+  Serial.println("pitch 主导 -> (RIGHT / LEFT), roll 主导 -> (FORWARD / BACKWARD)");
+  Serial.println("CMD is printed every loop.");
   Serial.println();
 }
 
 void loop() {
-  int16_t ax, ay, az, gx, gy, gz;
-
-  bool ok = readAccelGyroRaw(ax, ay, az, gx, gy, gz);
-
-  if (!ok) {
-    Serial.println("❌ Read accel/gyro failed");
+  float rollDeg, pitchDeg;
+  if (!readRollPitch(rollDeg, pitchDeg)) {
+    Serial.println("Read roll/pitch failed");
     Serial.println();
-    delay(500);
+    delay(200);
     return;
   }
 
-  // 转换为物理单位
-  float ax_g = (float)ax / ACC_LSB_PER_G;
-  float ay_g = (float)ay / ACC_LSB_PER_G;
-  float az_g = (float)az / ACC_LSB_PER_G;
+  // 相对水平角度
+  float rollRel  = rollDeg  - baseRoll;
+  float pitchRel = pitchDeg - basePitch;
 
-  float gx_dps = (float)gx / GYR_LSB_PER_DPS;
-  float gy_dps = (float)gy / GYR_LSB_PER_DPS;
-  float gz_dps = (float)gz / GYR_LSB_PER_DPS;
+  // 角度低通滤波
+  rollFilt  = rollFilt  + ALPHA_ANGLE * (rollRel  - rollFilt);
+  pitchFilt = pitchFilt + ALPHA_ANGLE * (pitchRel - pitchFilt);
 
-  // 输出（全部 println）
-  Serial.println("RAW AX AY AZ:");
-  Serial.println(ax);
-  Serial.println(ay);
-  Serial.println(az);
+  String cmd = decideCommandFromAngles(rollFilt, pitchFilt);
+  lastCmd = cmd;
+
+  // 每次 loop 都输出当前角度和 CMD
+  Serial.println("ROLL / PITCH relative (deg):");
+  Serial.println(rollFilt);
+  Serial.println(pitchFilt);
   Serial.println();
 
-  Serial.println("RAW GX GY GZ:");
-  Serial.println(gx);
-  Serial.println(gy);
-  Serial.println(gz);
+  Serial.println("CMD:");
+  Serial.println(cmd);
   Serial.println();
 
-  Serial.println("ACCEL (g) AX AY AZ:");
-  Serial.println(ax_g, 6);
-  Serial.println(ay_g, 6);
-  Serial.println(az_g, 6);
-  Serial.println();
-
-  Serial.println("GYRO (deg/s) GX GY GZ:");
-  Serial.println(gx_dps, 6);
-  Serial.println(gy_dps, 6);
-  Serial.println(gz_dps, 6);
-  Serial.println();
-
-  Serial.println("-----");
-  Serial.println();
-
-  delay(200); // 5Hz 输出，便于观察与截图
+  delay(40);  // ~25Hz
 }
