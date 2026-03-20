@@ -18,7 +18,8 @@ BleComboMouse    bleMouse(&bleKB);
 #define RDY_PIN      19
 #define LED_PIN      2
 #define BUTTON_BOOT  0    // BOOT（按下=LOW）
-#define BUTTON1_PIN  33   // 新外接按钮 button1（按下=LOW）
+#define BUTTON1_PIN  33   // 外接按钮 button1（按下=LOW）
+#define BUTTON2_PIN  32   // 外接按钮 button2（按下=LOW）
 
 // ===== IQS5xx 常用寄存器 =====
 #define REG_NUM_FINGERS      0x0011
@@ -39,8 +40,9 @@ bool btnPrev = false;
 unsigned long btnDownAt = 0;
 bool clearBondTriggered = false;
 
-// ===== button1 状态 =====
+// ===== button1 / button2 状态 =====
 bool button1Prev = false;
+bool button2Prev = false;
 
 // ===== 上一帧坐标 =====
 uint16_t lastX = 0, lastY = 0;
@@ -120,8 +122,8 @@ static void clearAllBondedDevices() {
   free(dev_list);
 }
 
-// ===== 处理“长按5秒清配对 / 短按打字”的按钮逻辑 =====
-void handlePowerButton(bool bleConnected) {
+// ===== 处理“长按5秒清配对”的按钮逻辑 =====
+void handlePowerButton() {
   bool pressed = (digitalRead(BUTTON_BOOT) == LOW);
 
   // 刚按下：记录时间
@@ -144,32 +146,12 @@ void handlePowerButton(bool bleConnected) {
     }
   }
 
-  // 松开：如果按得不够长，当成“短按”→ 打字 'A'
-  if (!pressed && btnPrev) {
-    unsigned long held = millis() - btnDownAt;
-    if (!clearBondTriggered && held < CLEAR_BOND_LONG_MS) {
-      if (bleConnected) {
-        bleKB.print("A");
-        Serial.println("BOOT short press -> 'A'");
-      } else {
-        Serial.println("BOOT short press, but BLE not connected");
-      }
-    }
-  }
-
   btnPrev = pressed;
 }
 
 // ===== 处理 button1：目前只打印 =====
 void handleButton1() {
-  static unsigned long lastPrint = 0;
   bool pressed = (digitalRead(BUTTON1_PIN) == LOW);
-
-  if (millis() - lastPrint > 500) {
-    Serial.print("BUTTON1 raw = ");
-    Serial.println(digitalRead(BUTTON1_PIN));
-    lastPrint = millis();
-  }
 
   if (pressed && !button1Prev) {
     Serial.println("button1 pressed");
@@ -177,6 +159,19 @@ void handleButton1() {
 
   button1Prev = pressed;
 }
+
+// ===== 处理 button2：目前只打印 =====
+void handleButton2() {
+  bool pressed = (digitalRead(BUTTON2_PIN) == LOW);
+
+  if (pressed && !button2Prev) {
+    Serial.println("button2 pressed");
+  }
+
+  button2Prev = pressed;
+}
+
+
 /************************************************* Set up *************************************************/
 
 void setup() {
@@ -188,6 +183,7 @@ void setup() {
   pinMode(RDY_PIN, INPUT);
   pinMode(BUTTON_BOOT, INPUT_PULLUP);
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN, INPUT_PULLUP);
 
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);
@@ -195,9 +191,9 @@ void setup() {
 
   bleKB.begin();
   Serial.println("BLE Combo (Keyboard+Mouse) started");
-  Serial.println("BOOT short press -> type 'A'");
   Serial.println("BOOT hold 5s -> clear BLE bonds and restart");
-  Serial.println("BUTTON1 ready on GPIO15");
+  Serial.println("BUTTON1 ready on GPIO33");
+  Serial.println("BUTTON2 ready on GPIO32");
 }
 
 
@@ -263,11 +259,12 @@ void loop() {
     digitalWrite(LED_PIN, LOW);
   }
 
-  // —— 2) 处理“长按5秒清配对 / 短按打字” ——
-  handlePowerButton(connected);
+  // —— 2) 处理“长按5秒清配对” ——
+  handlePowerButton();
 
-  // —— 3) 处理 button1 ——
+  // —— 3) 处理 button1 / button2 ——
   handleButton1();
+  handleButton2();
 
   delay(1);
 }
