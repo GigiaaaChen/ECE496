@@ -1,4 +1,7 @@
 #include <Wire.h>
+#include <math.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
 #include <BleCombo.h>     // ESP32_BLE_Combo_Keyboard_Mouse
 #include <esp_sleep.h>
 #include <esp_gap_ble_api.h>
@@ -6,49 +9,119 @@
 #include <esp_bt_device.h>
 #include <stdlib.h>
 
-// ===== BLE 组合设备：先键盘，再把鼠标关联上 =====
+// =====================================================
+// BLE 组合设备：先键盘，再把鼠标关联上
+// =====================================================
 BleComboKeyboard bleKB("HeadsUp-Remote KBM v5", "Caroline-496-remote", 100);
 BleComboMouse    bleMouse(&bleKB);
 
-// ===== 引脚 / I2C 地址 =====
-#define I2C_ADDR     0x74
+// =====================================================
+// 引脚 / I2C 地址
+// =====================================================
+// 这里让 touchpad 和 MPU6050 共用同一条 I2C 总线
 #define SDA_PIN      21
 #define SCL_PIN      22
+
+// touchpad
+#define I2C_ADDR     0x74
 #define RST_PIN      23
 #define RDY_PIN      19
+
+// buttons / LED
 #define LED_PIN      2
 #define BUTTON_BOOT  0    // BOOT（按下=LOW）
-#define BUTTON1_PIN  33   // 外接按钮 button1（按下=LOW）
-#define BUTTON2_PIN  32   // 外接按钮 button2（按下=LOW）
+#define BUTTON1_PIN  33   // mode toggle（按下=LOW）
+#define BUTTON2_PIN  32   // 预留（按下=LOW）
 
-// ===== IQS5xx 常用寄存器 =====
+// =====================================================
+// IQS5xx 常用寄存器
+// =====================================================
 #define REG_NUM_FINGERS      0x0011
 #define REG_ABS_X_F1         0x0017
 #define REG_ABS_Y_F1         0x0019
 #define REG_GESTURE_EVENTS0  0x000D   // bit0: SINGLE_TAP
 #define REG_END_WINDOW       0xEEEE
 
-// ===== 鼠标移动参数 =====
+// =====================================================
+// 触控板鼠标移动参数
+// =====================================================
 const int MOVE_DIV = 30;
 const int MOVE_CAP = 7;
 const int MOTION_THRESH = 8;
 bool INVERT_Y = false;  // 上下反就改成 true
 
-// ===== BOOT 参数 =====
+// =====================================================
+// BOOT 参数
+// =====================================================
 const unsigned long CLEAR_BOND_LONG_MS = 5000;  // 长按5秒：清除旧 BLE 配对并重启
 bool btnPrev = false;
 unsigned long btnDownAt = 0;
 bool clearBondTriggered = false;
 
-// ===== button1 / button2 状态 =====
+// =====================================================
+// button1 / button2 状态
+// =====================================================
 bool button1Prev = false;
 bool button2Prev = false;
 
-// ===== 上一帧坐标 =====
+// =====================================================
+// 上一帧 touchpad 坐标
+// =====================================================
 uint16_t lastX = 0, lastY = 0;
 bool haveLast = false;
 
-// ===== I2C helpers =====
+// =====================================================
+// WiFi / TCP
+// =====================================================
+const char* ssid     = "RDKX5-Hotspot";
+const char* password = "ECE49666";
+const char* host     = "10.42.0.1";
+const int port       = 5000;
+
+WiFiClient client;
+bool manualNetworkReady = false;   // 是否至少成功建立过 manual 用的网络链路
+
+// =====================================================
+// 模式
+// =====================================================
+enum ControlMode {
+  AUTO_MODE = 0,
+  MANUAL_MODE = 1
+};
+
+ControlMode currentMode = AUTO_MODE;
+
+// =====================================================
+// MPU6050
+// =====================================================
+#define MPU_ADDR 0x68
+
+#define REG_PWR_MGMT_1   0x6B
+#define REG_SMPLRT_DIV   0x19
+#define REG_CONFIG       0x1A
+#define REG_GYRO_CONFIG  0x1B
+#define REG_ACCEL_CONFIG 0x1C
+#define REG_ACCEL_XOUT_H 0x3B
+
+const float ACC_LSB_PER_G = 16384.0f;
+
+// 角度参数
+const float SMALL_DEADBAND = 2.0f;
+const float STOP_RANGE     = 15.0f;
+const float ALPHA_ANGLE    = 0.15f;
+
+// IMU 全局状态
+float baseRoll = 0.0f;
+float basePitch = 0.0f;
+
+float rollFilt = 0.0f;
+float pitchFilt = 0.0f;
+
+String lastCmd = "STOP";
+
+// =====================================================
+// I2C helpers: touchpad
+// =====================================================
 static bool iqs_read(uint16_t reg, uint8_t* buf, uint8_t len) {
   Wire.beginTransmission((uint8_t)I2C_ADDR);
   Wire.write((uint8_t)(reg >> 8));
@@ -77,7 +150,9 @@ static bool iqs_write1(uint16_t reg, uint8_t val) {
   return Wire.endTransmission(true) == 0;
 }
 
-// ===== 触控板硬复位 =====
+// =====================================================
+// 触控板硬复位
+// =====================================================
 static void hardResetTP() {
   pinMode(RST_PIN, OUTPUT);
   digitalWrite(RST_PIN, LOW);
@@ -86,7 +161,9 @@ static void hardResetTP() {
   delay(50);
 }
 
-// ===== 清除所有 BLE bonded devices =====
+// =====================================================
+// 清除所有 BLE bonded devices
+// =====================================================
 static void clearAllBondedDevices() {
   int dev_num = esp_ble_get_bond_device_num();
   Serial.printf("Bonded device count: %d\n", dev_num);
@@ -122,17 +199,307 @@ static void clearAllBondedDevices() {
   free(dev_list);
 }
 
-// ===== 处理“长按5秒清配对”的按钮逻辑 =====
+// =====================================================
+// MPU6050: 写 1 字节
+// =====================================================
+bool mpuWriteByte(uint8_t reg, uint8_t data) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(reg);
+  Wire.write(data);
+  uint8_t err = Wire.endTransmission(true);
+  return (err == 0);
+}
+
+// =====================================================
+// MPU6050: 连续读多个字节
+// =====================================================
+bool mpuReadBytes(uint8_t startReg, uint8_t *buf, uint8_t len) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(startReg);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)len);
+
+  uint8_t i = 0;
+  while (Wire.available() && i < len) {
+    buf[i] = Wire.read();
+    i++;
+  }
+
+  return (i == len);
+}
+
+// =====================================================
+// 初始化 MPU6050
+// =====================================================
+bool mpuInit() {
+  if (!mpuWriteByte(REG_PWR_MGMT_1, 0x00)) return false;
+  delay(100);
+
+  if (!mpuWriteByte(REG_SMPLRT_DIV, 0x07)) return false;
+  if (!mpuWriteByte(REG_CONFIG, 0x06)) return false;
+  if (!mpuWriteByte(REG_GYRO_CONFIG, 0x00)) return false;
+  if (!mpuWriteByte(REG_ACCEL_CONFIG, 0x00)) return false;
+
+  return true;
+}
+
+// =====================================================
+// 读 roll / pitch
+// =====================================================
+bool readRollPitch(float &rollDeg, float &pitchDeg) {
+  uint8_t buf[6];
+
+  if (!mpuReadBytes(REG_ACCEL_XOUT_H, buf, 6)) {
+    return false;
+  }
+
+  int16_t ax_raw = (int16_t)((buf[0] << 8) | buf[1]);
+  int16_t ay_raw = (int16_t)((buf[2] << 8) | buf[3]);
+  int16_t az_raw = (int16_t)((buf[4] << 8) | buf[5]);
+
+  float ax = ((float)ax_raw) / ACC_LSB_PER_G;
+  float ay = ((float)ay_raw) / ACC_LSB_PER_G;
+  float az = ((float)az_raw) / ACC_LSB_PER_G;
+
+  float roll  = atan2f(ay, az);
+  float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+
+  const float RAD2DEG = 57.2957795f;
+  rollDeg  = roll * RAD2DEG;
+  pitchDeg = pitch * RAD2DEG;
+
+  return true;
+}
+
+// =====================================================
+// 初始水平校准
+// =====================================================
+void calibrateLevel() {
+  Serial.println("Calibrating level, keep board still...");
+  const int N = 200;
+  float sumRoll = 0.0f;
+  float sumPitch = 0.0f;
+  int validCount = 0;
+
+  for (int i = 0; i < N; i++) {
+    float r, p;
+    if (readRollPitch(r, p)) {
+      sumRoll += r;
+      sumPitch += p;
+      validCount++;
+    }
+    delay(10);
+  }
+
+  if (validCount > 0) {
+    baseRoll = sumRoll / (float)validCount;
+    basePitch = sumPitch / (float)validCount;
+  } else {
+    baseRoll = 0.0f;
+    basePitch = 0.0f;
+  }
+
+  rollFilt = 0.0f;
+  pitchFilt = 0.0f;
+
+  Serial.println("Calibration done.");
+  Serial.print("Base roll: ");
+  Serial.println(baseRoll);
+  Serial.print("Base pitch: ");
+  Serial.println(basePitch);
+}
+
+// =====================================================
+// 根据相对角度判断命令
+// =====================================================
+String decideCommandFromAngles(float rollRel, float pitchRel) {
+  if (fabs(rollRel) < SMALL_DEADBAND) {
+    rollRel = 0.0f;
+  }
+
+  if (fabs(pitchRel) < SMALL_DEADBAND) {
+    pitchRel = 0.0f;
+  }
+
+  float ar = fabs(rollRel);
+  float ap = fabs(pitchRel);
+
+  if (ar < STOP_RANGE && ap < STOP_RANGE) {
+    return "STOP";
+  }
+
+  if (ap >= ar) {
+    // pitch 主导
+    if (pitchRel >= STOP_RANGE) {
+      return "LEFT";
+    } else if (pitchRel <= -STOP_RANGE) {
+      return "RIGHT";
+    } else {
+      return "STOP";
+    }
+  } else {
+    // roll 主导
+    if (rollRel >= STOP_RANGE) {
+      return "FORWARD";
+    } else if (rollRel <= -STOP_RANGE) {
+      return "BACKWARD";
+    } else {
+      return "STOP";
+    }
+  }
+}
+
+// =====================================================
+// 连接 WiFi
+// =====================================================
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+
+  // 不要在 BLE + WiFi 共存时关闭 modem sleep
+  // WiFi.setSleep(false);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  Serial.println("Connecting to WiFi...");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  unsigned long t0 = millis();
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.println("Waiting for WiFi...");
+
+    if (millis() - t0 > 20000) {
+      Serial.println("WiFi connect timeout, retrying...");
+      WiFi.disconnect(true);
+      delay(1000);
+      WiFi.begin(ssid, password);
+      t0 = millis();
+    }
+  }
+
+  Serial.println("WiFi connected.");
+  Serial.print("ESP32 IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("RSSI: ");
+  Serial.println(WiFi.RSSI());
+}
+
+// =====================================================
+// 保证 TCP 已连接
+// =====================================================
+bool ensureTcpConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi dropped. Reconnecting...");
+    connectWiFi();
+  }
+
+  if (client.connected()) {
+    return true;
+  }
+
+  Serial.println("Connecting to RDK server...");
+  Serial.print("Host: ");
+  Serial.println(host);
+  Serial.print("Port: ");
+  Serial.println(port);
+
+  if (client.connect(host, port)) {
+    client.setNoDelay(true);
+    Serial.println("TCP connected to RDK.");
+    return true;
+  } else {
+    Serial.println("TCP connect failed.");
+    return false;
+  }
+}
+
+// =====================================================
+// 发送一行到 RDK
+// =====================================================
+void sendLineToRDK(const String &line) {
+  if (!ensureTcpConnected()) {
+    Serial.println("Send skipped: TCP not connected.");
+    return;
+  }
+
+  client.print(line);
+  client.print("\n");
+
+  Serial.print("Sent to RDK: ");
+  Serial.println(line);
+
+  while (client.available() > 0) {
+    String resp = client.readStringUntil('\n');
+    Serial.print("RDK replied: ");
+    Serial.println(resp);
+  }
+}
+
+// =====================================================
+// 进入 manual mode
+// 首次进入时才真正建立 WiFi/TCP
+// 每次进入前都要先发 MANUAL
+// =====================================================
+void switchToManualMode() {
+  if (!manualNetworkReady) {
+    connectWiFi();
+    if (!ensureTcpConnected()) {
+      Serial.println("Cannot enter MANUAL mode because TCP is not ready.");
+      return;
+    }
+    manualNetworkReady = true;
+  } else {
+    if (!ensureTcpConnected()) {
+      Serial.println("TCP reconnect failed, MANUAL mode switch aborted.");
+      return;
+    }
+  }
+
+  sendLineToRDK("MANUAL");
+  currentMode = MANUAL_MODE;
+  lastCmd = "STOP";
+  Serial.println("Mode changed to MANUAL_MODE");
+}
+
+// =====================================================
+// 回到 auto mode
+// 切换前先发 AUTO，再切模式
+// =====================================================
+void switchToAutoMode() {
+  if (manualNetworkReady) {
+    if (ensureTcpConnected()) {
+      sendLineToRDK("AUTO");
+    } else {
+      Serial.println("Warning: failed to send AUTO before switching back.");
+    }
+  }
+
+  currentMode = AUTO_MODE;
+  haveLast = false;
+  Serial.println("Mode changed to AUTO_MODE");
+}
+
+// =====================================================
+// 处理“长按5秒清配对”的按钮逻辑
+// =====================================================
 void handlePowerButton() {
   bool pressed = (digitalRead(BUTTON_BOOT) == LOW);
 
-  // 刚按下：记录时间
   if (pressed && !btnPrev) {
     btnDownAt = millis();
     clearBondTriggered = false;
   }
 
-  // 按住超过5秒：清除旧配对并重启
   if (pressed && btnPrev && !clearBondTriggered) {
     unsigned long held = millis() - btnDownAt;
     if (held >= CLEAR_BOND_LONG_MS) {
@@ -149,18 +516,28 @@ void handlePowerButton() {
   btnPrev = pressed;
 }
 
-// ===== 处理 button1：目前只打印 =====
+// =====================================================
+// button1：切换模式
+// =====================================================
 void handleButton1() {
   bool pressed = (digitalRead(BUTTON1_PIN) == LOW);
 
   if (pressed && !button1Prev) {
     Serial.println("button1 pressed");
+
+    if (currentMode == AUTO_MODE) {
+      switchToManualMode();
+    } else {
+      switchToAutoMode();
+    }
   }
 
   button1Prev = pressed;
 }
 
-// ===== 处理 button2：目前只打印 =====
+// =====================================================
+// button2：目前只打印
+// =====================================================
 void handleButton2() {
   bool pressed = (digitalRead(BUTTON2_PIN) == LOW);
 
@@ -171,42 +548,16 @@ void handleButton2() {
   button2Prev = pressed;
 }
 
-
-/************************************************* Set up *************************************************/
-
-void setup() {
-  Serial.begin(115200);
-  delay(100);
-
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(RST_PIN, OUTPUT);
-  pinMode(RDY_PIN, INPUT);
-  pinMode(BUTTON_BOOT, INPUT_PULLUP);
-  pinMode(BUTTON1_PIN, INPUT_PULLUP);
-  pinMode(BUTTON2_PIN, INPUT_PULLUP);
-
-  Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(100000);
-  hardResetTP();
-
-  bleKB.begin();
-  Serial.println("BLE Combo (Keyboard+Mouse) started");
-  Serial.println("BOOT hold 5s -> clear BLE bonds and restart");
-  Serial.println("BUTTON1 ready on GPIO33");
-  Serial.println("BUTTON2 ready on GPIO32");
-}
-
-
-/************************************************* Main *************************************************/
-
-void loop() {
+// =====================================================
+// AUTO mode：处理 touchpad -> BLE mouse
+// =====================================================
+void handleAutoModeTouchpad() {
   bool connected = bleKB.isConnected();
 
-  // —— 1) 读手势事件（单击）+ 坐标（鼠标移动） ——
-  if (digitalRead(RDY_PIN) != LOW) { // 极性不对就改成 == LOW
+  if (digitalRead(RDY_PIN) != LOW) {   // 极性不对就改成 == LOW
     bool anyData = false;
 
-    // 手势：SINGLE_TAP → 左键点击
+    // 手势：SINGLE_TAP -> 左键点击
     uint8_t ge0 = 0;
     if (iqs_read(REG_GESTURE_EVENTS0, &ge0, 1)) {
       anyData = true;
@@ -216,15 +567,17 @@ void loop() {
       }
     }
 
-    // 坐标 → 鼠标移动
+    // 坐标 -> 鼠标移动
     uint8_t nf = 0;
     if (iqs_read(REG_NUM_FINGERS, &nf, 1)) {
       if (nf > 0) {
         uint16_t x = 0, y = 0;
         bool okx = iqs_read_u16(REG_ABS_X_F1, x);
         bool oky = iqs_read_u16(REG_ABS_Y_F1, y);
+
         if (okx && oky) {
           anyData = true;
+
           if (!haveLast) {
             lastX = x;
             lastY = y;
@@ -236,13 +589,16 @@ void loop() {
             if (abs(dx) > MOTION_THRESH || abs(dy) > MOTION_THRESH) {
               int mx = dx / MOVE_DIV;
               int my = dy / MOVE_DIV;
+
               if (mx >  MOVE_CAP) mx =  MOVE_CAP;
               if (mx < -MOVE_CAP) mx = -MOVE_CAP;
               if (my >  MOVE_CAP) my =  MOVE_CAP;
               if (my < -MOVE_CAP) my = -MOVE_CAP;
+
               if (INVERT_Y) my = -my;
 
               if (connected) bleMouse.move((int8_t)mx, (int8_t)my);
+
               lastX = x;
               lastY = y;
             }
@@ -258,13 +614,97 @@ void loop() {
   } else {
     digitalWrite(LED_PIN, LOW);
   }
+}
 
-  // —— 2) 处理“长按5秒清配对” ——
+// =====================================================
+// MANUAL mode：处理 IMU -> TCP command
+// =====================================================
+void handleManualModeIMU() {
+  float rollDeg, pitchDeg;
+
+  if (!readRollPitch(rollDeg, pitchDeg)) {
+    Serial.println("Read roll/pitch failed.");
+    delay(50);
+    return;
+  }
+
+  float rollRel  = rollDeg  - baseRoll;
+  float pitchRel = pitchDeg - basePitch;
+
+  rollFilt  = rollFilt  + ALPHA_ANGLE * (rollRel  - rollFilt);
+  pitchFilt = pitchFilt + ALPHA_ANGLE * (pitchRel - pitchFilt);
+
+  String cmd = decideCommandFromAngles(rollFilt, pitchFilt);
+  lastCmd = cmd;
+
+  Serial.print("ROLL relative (deg): ");
+  Serial.println(rollFilt);
+  Serial.print("PITCH relative (deg): ");
+  Serial.println(pitchFilt);
+  Serial.print("Current CMD: ");
+  Serial.println(cmd);
+
+  sendLineToRDK(cmd);
+}
+
+// =====================================================
+// setup
+// =====================================================
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(RST_PIN, OUTPUT);
+  pinMode(RDY_PIN, INPUT);
+  pinMode(BUTTON_BOOT, INPUT_PULLUP);
+  pinMode(BUTTON1_PIN, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN, INPUT_PULLUP);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000);
+
+  hardResetTP();
+
+  bleKB.begin();
+
+  Serial.println();
+  Serial.println("BLE Combo (Keyboard+Mouse) started");
+  Serial.println("BOOT hold 5s -> clear BLE bonds and restart");
+  Serial.println("BUTTON1 -> toggle AUTO / MANUAL mode");
+  Serial.println("BUTTON2 -> print only");
+  Serial.println("Default mode: AUTO_MODE");
+
+  if (!mpuInit()) {
+    Serial.println("MPU init failed.");
+    while (1) {
+      delay(1000);
+    }
+  }
+
+  Serial.println("MPU init OK.");
+  calibrateLevel();
+
+  Serial.println("System ready.");
+}
+
+// =====================================================
+// loop
+// =====================================================
+void loop() {
+  // 1) BOOT 长按清配对
   handlePowerButton();
 
-  // —— 3) 处理 button1 / button2 ——
+  // 2) button1 / button2
   handleButton1();
   handleButton2();
 
-  delay(1);
+  // 3) 按当前模式处理
+  if (currentMode == AUTO_MODE) {
+    handleAutoModeTouchpad();
+  } else {
+    handleManualModeIMU();
+  }
+
+  delay(10);
 }
