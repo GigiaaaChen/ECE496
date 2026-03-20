@@ -31,7 +31,7 @@ BleComboMouse    bleMouse(&bleKB);
 #define LED_PIN      2
 #define BUTTON_BOOT  0    // BOOT（按下=LOW）
 #define BUTTON1_PIN  33   // mode toggle（按下=LOW）
-#define BUTTON2_PIN  32   // 预留（按下=LOW）
+#define BUTTON2_PIN  32   // lock/unlock toggle（按下=LOW）
 
 // =====================================================
 // IQS5xx 常用寄存器
@@ -64,6 +64,14 @@ bool clearBondTriggered = false;
 bool button1Prev = false;
 bool button2Prev = false;
 
+// button2: lock / unlock 翻转状态
+// false 表示当前未锁，因此下一次按下会发送 "lock"
+// true  表示当前已锁，因此下一次按下会发送 "unlock"
+bool lockState = false;
+
+// 避免 button2 在 manual mode 下触发后，同一轮 loop 又立刻发送 IMU 命令
+bool skipManualCmdThisLoop = false;
+
 // =====================================================
 // 上一帧 touchpad 坐标
 // =====================================================
@@ -79,7 +87,9 @@ const char* host     = "10.42.0.1";
 const int port       = 5000;
 
 WiFiClient client;
-bool manualNetworkReady = false;   // 是否至少成功建立过 manual 用的网络链路
+
+// 是否至少成功建立过一次 manual 用的网络链路
+bool manualNetworkReady = false;
 
 // =====================================================
 // 模式
@@ -425,11 +435,12 @@ bool ensureTcpConnected() {
 
 // =====================================================
 // 发送一行到 RDK
+// 成功返回 true，失败返回 false
 // =====================================================
-void sendLineToRDK(const String &line) {
+bool sendLineToRDK(const String &line) {
   if (!ensureTcpConnected()) {
     Serial.println("Send skipped: TCP not connected.");
-    return;
+    return false;
   }
 
   client.print(line);
@@ -443,6 +454,8 @@ void sendLineToRDK(const String &line) {
     Serial.print("RDK replied: ");
     Serial.println(resp);
   }
+
+  return true;
 }
 
 // =====================================================
@@ -465,7 +478,11 @@ void switchToManualMode() {
     }
   }
 
-  sendLineToRDK("MANUAL");
+  if (!sendLineToRDK("MANUAL")) {
+    Serial.println("Failed to send MANUAL.");
+    return;
+  }
+
   currentMode = MANUAL_MODE;
   lastCmd = "STOP";
   Serial.println("Mode changed to MANUAL_MODE");
@@ -478,7 +495,9 @@ void switchToManualMode() {
 void switchToAutoMode() {
   if (manualNetworkReady) {
     if (ensureTcpConnected()) {
-      sendLineToRDK("AUTO");
+      if (!sendLineToRDK("AUTO")) {
+        Serial.println("Warning: failed to send AUTO before switching back.");
+      }
     } else {
       Serial.println("Warning: failed to send AUTO before switching back.");
     }
@@ -536,13 +555,43 @@ void handleButton1() {
 }
 
 // =====================================================
-// button2：目前只打印
+// button2：
+// 当 TCP 曾经成功连接过至少一次后，
+// 每次按下在 "lock" / "unlock" 之间翻转并发送
 // =====================================================
 void handleButton2() {
   bool pressed = (digitalRead(BUTTON2_PIN) == LOW);
 
   if (pressed && !button2Prev) {
     Serial.println("button2 pressed");
+
+    if (!manualNetworkReady) {
+      Serial.println("button2 ignored: TCP has never been connected yet.");
+    } else {
+      if (!ensureTcpConnected()) {
+        Serial.println("button2 action failed: TCP reconnect failed.");
+      } else {
+        String lineToSend;
+
+        if (!lockState) {
+          lineToSend = "lock";
+        } else {
+          lineToSend = "unlock";
+        }
+
+        if (sendLineToRDK(lineToSend)) {
+          lockState = !lockState;
+          Serial.print("button2 action -> ");
+          Serial.println(lineToSend);
+
+          if (currentMode == MANUAL_MODE) {
+            skipManualCmdThisLoop = true;
+          }
+        } else {
+          Serial.println("button2 action failed: send failed.");
+        }
+      }
+    }
   }
 
   button2Prev = pressed;
@@ -672,7 +721,7 @@ void setup() {
   Serial.println("BLE Combo (Keyboard+Mouse) started");
   Serial.println("BOOT hold 5s -> clear BLE bonds and restart");
   Serial.println("BUTTON1 -> toggle AUTO / MANUAL mode");
-  Serial.println("BUTTON2 -> print only");
+  Serial.println("BUTTON2 -> lock / unlock toggle after first TCP connection");
   Serial.println("Default mode: AUTO_MODE");
 
   if (!mpuInit()) {
@@ -703,7 +752,11 @@ void loop() {
   if (currentMode == AUTO_MODE) {
     handleAutoModeTouchpad();
   } else {
-    handleManualModeIMU();
+    if (skipManualCmdThisLoop) {
+      skipManualCmdThisLoop = false;
+    } else {
+      handleManualModeIMU();
+    }
   }
 
   delay(10);
