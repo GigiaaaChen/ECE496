@@ -1,6 +1,11 @@
 #include <Wire.h>
 #include <math.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
 
+// =========================
+// I2C / MPU6050
+// =========================
 #define SDA_PIN 22
 #define SCL_PIN 23
 
@@ -16,23 +21,49 @@
 // 加速度计灵敏度：±2g 对应 16384 LSB/g
 const float ACC_LSB_PER_G = 16384.0f;
 
-// 进入动作的角度阈值（对称使用 ±ANGLE_ENTER）
-const float ANGLE_ENTER = 10.0f;   // 超过 10° 认为有动作
-// 角度低通滤波系数
-const float ALPHA_ANGLE = 0.15f;
-// 小死区：小于这个角度直接当 0，减少抖动
+// =========================
+// 角度参数
+// =========================
+
+// 很小的抖动直接当作 0
 const float SMALL_DEADBAND = 2.0f;
 
+// 轻微倾斜仍然保持 STOP
+const float STOP_RANGE = 15.0f;
+
+// 角度低通滤波系数
+const float ALPHA_ANGLE = 0.15f;
+
+// =========================
+// WiFi / TCP
+// =========================
+const char* ssid     = "RDKX5-Hotspot";
+const char* password = "ECE49666";
+
+// NetworkManager hotspot 常见默认：10.42.0.1
+const char* host = "10.42.0.1";
+
+// 如果你后面换成 hostapd 方案，再改成这个：
+// const char* host = "10.5.5.1";
+
+const int port = 5000;
+
+WiFiClient client;
+
+// =========================
+// 全局状态
+// =========================
 float baseRoll = 0.0f;
 float basePitch = 0.0f;
 
 float rollFilt = 0.0f;
 float pitchFilt = 0.0f;
 
-// 仅用于内部逻辑的记忆（当前方向）
 String lastCmd = "STOP";
 
-// ========== I2C 写一个字节 ==========
+// =========================
+// MPU6050: 写 1 字节
+// =========================
 bool mpuWriteByte(uint8_t reg, uint8_t data) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
@@ -41,39 +72,49 @@ bool mpuWriteByte(uint8_t reg, uint8_t data) {
   return (err == 0);
 }
 
-// ========== I2C 连续读多个字节 ==========
+// =========================
+// MPU6050: 连续读多个字节
+// =========================
 bool mpuReadBytes(uint8_t startReg, uint8_t *buf, uint8_t len) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(startReg);
+
   if (Wire.endTransmission(false) != 0) {
     return false;
   }
+
   Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)len);
+
   uint8_t i = 0;
   while (Wire.available() && i < len) {
     buf[i] = Wire.read();
     i++;
   }
+
   return (i == len);
 }
 
-// ========== 初始化 MPU6050 ==========
+// =========================
+// 初始化 MPU6050
+// =========================
 bool mpuInit() {
   if (!mpuWriteByte(REG_PWR_MGMT_1, 0x00)) return false;
   delay(100);
 
   if (!mpuWriteByte(REG_SMPLRT_DIV, 0x07)) return false;
   if (!mpuWriteByte(REG_CONFIG, 0x06)) return false;
-
-  if (!mpuWriteByte(REG_GYRO_CONFIG, 0x00)) return false;   // Gyro ±250 dps
-  if (!mpuWriteByte(REG_ACCEL_CONFIG, 0x00)) return false;  // Accel ±2g
+  if (!mpuWriteByte(REG_GYRO_CONFIG, 0x00)) return false;
+  if (!mpuWriteByte(REG_ACCEL_CONFIG, 0x00)) return false;
 
   return true;
 }
 
-// ========== 由加速度解算 roll / pitch（绝对角度，单位：度）==========
+// =========================
+// 读 roll / pitch
+// =========================
 bool readRollPitch(float &rollDeg, float &pitchDeg) {
   uint8_t buf[6];
+
   if (!mpuReadBytes(REG_ACCEL_XOUT_H, buf, 6)) {
     return false;
   }
@@ -86,8 +127,6 @@ bool readRollPitch(float &rollDeg, float &pitchDeg) {
   float ay = ((float)ay_raw) / ACC_LSB_PER_G;
   float az = ((float)az_raw) / ACC_LSB_PER_G;
 
-  // roll：绕 X 轴左右倾斜
-  // pitch：绕 Y 轴前后倾斜
   float roll  = atan2f(ay, az);
   float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
 
@@ -98,7 +137,9 @@ bool readRollPitch(float &rollDeg, float &pitchDeg) {
   return true;
 }
 
-// ========== 初始水平校准 ==========
+// =========================
+// 初始水平校准
+// =========================
 void calibrateLevel() {
   Serial.println("Calibrating level, please keep board still and level...");
   Serial.println();
@@ -106,34 +147,45 @@ void calibrateLevel() {
   const int N = 200;
   float sumRoll = 0.0f;
   float sumPitch = 0.0f;
+  int validCount = 0;
 
   for (int i = 0; i < N; i++) {
     float r, p;
     if (readRollPitch(r, p)) {
       sumRoll += r;
       sumPitch += p;
+      validCount++;
     }
     delay(10);
   }
 
-  baseRoll = sumRoll / (float)N;
-  basePitch = sumPitch / (float)N;
+  if (validCount > 0) {
+    baseRoll = sumRoll / (float)validCount;
+    basePitch = sumPitch / (float)validCount;
+  } else {
+    baseRoll = 0.0f;
+    basePitch = 0.0f;
+  }
 
   rollFilt = 0.0f;
   pitchFilt = 0.0f;
 
-  Serial.println("Calibration done. Base roll / pitch:");
+  Serial.println("Calibration done.");
+  Serial.println("Base roll:");
   Serial.println(baseRoll);
+  Serial.println("Base pitch:");
   Serial.println(basePitch);
   Serial.println();
 }
 
-// ========== 根据“相对水平角度”输出方向（已做 F↔R, B↔L 交换）==========
+// =========================
+// 根据相对角度判断命令
+// =========================
 String decideCommandFromAngles(float rollRel, float pitchRel) {
-  // 小死区：太小的值直接当 0，减少抖动
   if (fabs(rollRel) < SMALL_DEADBAND) {
     rollRel = 0.0f;
   }
+
   if (fabs(pitchRel) < SMALL_DEADBAND) {
     pitchRel = 0.0f;
   }
@@ -141,33 +193,149 @@ String decideCommandFromAngles(float rollRel, float pitchRel) {
   float ar = fabs(rollRel);
   float ap = fabs(pitchRel);
 
-  // 两个方向都很小 -> STOP
-  if (ar < ANGLE_ENTER && ap < ANGLE_ENTER) {
+  // 轻微倾斜仍然认为是 STOP
+  if (ar < STOP_RANGE && ap < STOP_RANGE) {
     return "STOP";
   }
 
-  // 选绝对值更大的轴作为主方向
   if (ap >= ar) {
-    // ✅ pitch 主导：前后倾
-    // 之前是：pitch>0 -> RIGHT, pitch<0 -> LEFT
-    // 现在反过来：pitch>0 -> LEFT, pitch<0 -> RIGHT
-    if (pitchRel >= ANGLE_ENTER) {
+    // pitch 主导
+    if (pitchRel >= STOP_RANGE) {
       return "LEFT";
-    } else if (pitchRel <= -ANGLE_ENTER) {
+    } else if (pitchRel <= -STOP_RANGE) {
       return "RIGHT";
     } else {
       return "STOP";
     }
   } else {
-    // ✅ roll 主导：左右倾
-    // 保持不变：roll>0 -> FORWARD, roll<0 -> BACKWARD
-    if (rollRel >= ANGLE_ENTER) {
+    // roll 主导
+    if (rollRel >= STOP_RANGE) {
       return "FORWARD";
-    } else if (rollRel <= -ANGLE_ENTER) {
+    } else if (rollRel <= -STOP_RANGE) {
       return "BACKWARD";
     } else {
       return "STOP";
     }
+  }
+}
+
+// =========================
+// 连接 WiFi
+// =========================
+void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+
+  Serial.println("Connecting to WiFi...");
+  Serial.println("SSID:");
+  Serial.println(ssid);
+  Serial.println();
+
+  WiFi.begin(ssid, password);
+
+  unsigned long t0 = millis();
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Waiting for WiFi...");
+    Serial.println();
+    delay(500);
+
+    if (millis() - t0 > 20000) {
+      Serial.println("WiFi connect timeout, retrying...");
+      Serial.println();
+      WiFi.disconnect(true);
+      delay(1000);
+      WiFi.begin(ssid, password);
+      t0 = millis();
+    }
+  }
+
+  Serial.println("WiFi connected.");
+  Serial.println("ESP32 IP:");
+  Serial.println(WiFi.localIP());
+  Serial.println("RSSI:");
+  Serial.println(WiFi.RSSI());
+  Serial.println();
+}
+
+// =========================
+// 保证 TCP 已连接
+// 连上后发一次 MANUAL
+// =========================
+bool ensureTcpConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi dropped. Reconnecting...");
+    Serial.println();
+    connectWiFi();
+  }
+
+  if (client.connected()) {
+    return true;
+  }
+
+  Serial.println("Connecting to RDK server...");
+  Serial.println("Host:");
+  Serial.println(host);
+  Serial.println("Port:");
+  Serial.println(port);
+  Serial.println();
+
+  if (client.connect(host, port)) {
+    client.setNoDelay(true);
+
+    Serial.println("TCP connected to RDK.");
+    Serial.println();
+
+    // 连上 TCP 后发送一次 MANUAL 给 server
+    String initMsg = "MANUAL\n";
+    client.print(initMsg);
+
+    // 串口打印
+    Serial.println("Sending initial command to RDK:");
+    Serial.println("MANUAL");
+    Serial.println();
+
+    while (client.available() > 0) {
+      String line = client.readStringUntil('\n');
+      Serial.println("RDK replied:");
+      Serial.println(line);
+      Serial.println();
+    }
+
+    return true;
+  } else {
+    Serial.println("TCP connect failed.");
+    Serial.println();
+    return false;
+  }
+}
+
+// =========================
+// 发送命令到 RDK
+// =========================
+void sendCommandToRDK(const String &cmd) {
+  if (!ensureTcpConnected()) {
+    Serial.println("Send skipped: TCP not connected.");
+    Serial.println();
+    return;
+  }
+
+  String msg = cmd + "\n";
+
+  Serial.println("Sending command to RDK:");
+  Serial.println(cmd);
+  Serial.println();
+
+  client.print(msg);
+
+  Serial.println("Send done.");
+  Serial.println();
+
+  while (client.available() > 0) {
+    String line = client.readStringUntil('\n');
+    Serial.println("RDK replied:");
+    Serial.println(line);
+    Serial.println();
   }
 }
 
@@ -184,52 +352,57 @@ void setup() {
   delay(200);
 
   if (!mpuInit()) {
-    Serial.println("MPU init failed");
+    Serial.println("MPU init failed.");
     Serial.println();
     while (1) {
       delay(1000);
     }
   }
 
-  Serial.println("MPU init OK");
+  Serial.println("MPU init OK.");
   Serial.println();
-  calibrateLevel();
 
-  Serial.println("Tilt relative to level:");
-  Serial.println("pitch 主导 -> (RIGHT / LEFT), roll 主导 -> (FORWARD / BACKWARD)");
-  Serial.println("CMD is printed every loop.");
+  calibrateLevel();
+  connectWiFi();
+
+  Serial.println("System ready.");
+  Serial.println("pitch dominant -> LEFT / RIGHT");
+  Serial.println("roll dominant  -> FORWARD / BACKWARD");
+  Serial.println("Small tilt still stays in STOP range.");
+  Serial.println("Every loop will print and send current CMD.");
   Serial.println();
 }
 
 void loop() {
   float rollDeg, pitchDeg;
+
   if (!readRollPitch(rollDeg, pitchDeg)) {
-    Serial.println("Read roll/pitch failed");
+    Serial.println("Read roll/pitch failed.");
     Serial.println();
     delay(200);
     return;
   }
 
-  // 相对水平角度
   float rollRel  = rollDeg  - baseRoll;
   float pitchRel = pitchDeg - basePitch;
 
-  // 角度低通滤波
   rollFilt  = rollFilt  + ALPHA_ANGLE * (rollRel  - rollFilt);
   pitchFilt = pitchFilt + ALPHA_ANGLE * (pitchRel - pitchFilt);
 
   String cmd = decideCommandFromAngles(rollFilt, pitchFilt);
   lastCmd = cmd;
 
-  // 每次 loop 都输出当前角度和 CMD
-  Serial.println("ROLL / PITCH relative (deg):");
+  Serial.println("ROLL relative (deg):");
   Serial.println(rollFilt);
+  Serial.println("PITCH relative (deg):");
   Serial.println(pitchFilt);
   Serial.println();
 
-  Serial.println("CMD:");
+  Serial.println("Current CMD:");
   Serial.println(cmd);
   Serial.println();
 
-  delay(40);  // ~25Hz
+  sendCommandToRDK(cmd);
+
+  delay(40);
 }
