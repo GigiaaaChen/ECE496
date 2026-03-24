@@ -607,6 +607,19 @@ void handleButton2() {
 void handleAutoModeTouchpad() {
   bool connected = bleKB.isConnected();
 
+    // ===== scroll 平滑参数 =====
+  static float vScrollAccum = 0.0f;   // 竖直滚动累计器
+  static float hScrollAccum = 0.0f;   // 水平滚动累计器
+  static float dxScrollFilt = 0.0f;   // 双指 dx 低通滤波
+  static float dyScrollFilt = 0.0f;   // 双指 dy 低通滤波
+
+  const int   SCROLL_DEADBAND = 4;    // 小于这个就当噪声
+  const float SCROLL_ALPHA    = 0.18f; // 滤波强度，越小越稳，越大越跟手
+  const float SCROLL_GAIN_V   = 1.0f / 90.0f; // 竖直滚动增益
+  const float SCROLL_GAIN_H   = 1.0f / 100.0f; // 水平滚动增益（通常略慢一点）
+  const int   SCROLL_STEP_CAP = 1;    // 每帧最多发几格，防止暴冲
+  const float AXIS_DOM_RATIO  = 1.25f; // 判断主方向，不要太苛刻
+
   // 重新落指后的稳定计数
   static uint8_t touchStableCount = 0;
   const uint8_t TOUCH_SETTLE_FRAMES = 4;
@@ -660,25 +673,59 @@ void handleAutoModeTouchpad() {
               // =========================
               // 双指：上下滚轮
               // =========================
-              if (nf >= 2) {
+                            if (nf >= 2) {
                 int wheel = 0;
                 int hWheel = 0;
 
-                // 哪个轴更明显，就只发那个轴的 scroll
-                if (abs(dy) > abs(dx) * 2) {
-                  if (abs(dy) >= SCROLL_THRESH) {
-                    wheel = dy / SCROLL_DIV;
-                    if (wheel == 0) wheel = (dy > 0) ? 1 : -1;
-                    if (wheel >  SCROLL_CAP) wheel =  SCROLL_CAP;
-                    if (wheel < -SCROLL_CAP) wheel = -SCROLL_CAP;
+                // 先做一点低通滤波，减少双指滚动时的抖动
+                dxScrollFilt = dxScrollFilt + SCROLL_ALPHA * ((float)dx - dxScrollFilt);
+                dyScrollFilt = dyScrollFilt + SCROLL_ALPHA * ((float)dy - dyScrollFilt);
+
+                float adx = fabs(dxScrollFilt);
+                float ady = fabs(dyScrollFilt);
+
+                // 只选主方向，避免斜着滑时上下/左右一起乱滚
+                if (ady > adx * AXIS_DOM_RATIO) {
+                  // 竖直滚动
+                  if (ady >= SCROLL_DEADBAND) {
+                    vScrollAccum += dyScrollFilt * SCROLL_GAIN_V;
                   }
-                } else if (abs(dx) > abs(dy) * 2) {
-                  if (abs(dx) >= SCROLL_THRESH) {
-                    hWheel = -dx / SCROLL_DIV;
-                    if (hWheel == 0) hWheel = (dx > 0) ? -1 : 1;
-                    if (hWheel >  SCROLL_CAP) hWheel =  SCROLL_CAP;
-                    if (hWheel < -SCROLL_CAP) hWheel = -SCROLL_CAP;
+
+                  // 水平累计慢慢泄掉，避免方向切换时残留
+                  hScrollAccum *= 0.6f;
+                }
+                else if (adx > ady * AXIS_DOM_RATIO) {
+                  // 水平滚动
+                  if (adx >= SCROLL_DEADBAND) {
+                    hScrollAccum += (-dxScrollFilt) * SCROLL_GAIN_H;
                   }
+
+                  // 竖直累计慢慢泄掉，避免方向切换时残留
+                  vScrollAccum *= 0.6f;
+                }
+                else {
+                  // 方向不明确时，不立刻滚；把累计轻微衰减，避免乱跳
+                  vScrollAccum *= 0.85f;
+                  hScrollAccum *= 0.85f;
+                }
+
+                // 把累计量“吐”成实际 scroll step
+                while (vScrollAccum >= 1.0f && wheel < SCROLL_STEP_CAP) {
+                  wheel++;
+                  vScrollAccum -= 1.0f;
+                }
+                while (vScrollAccum <= -1.0f && wheel > -SCROLL_STEP_CAP) {
+                  wheel--;
+                  vScrollAccum += 1.0f;
+                }
+
+                while (hScrollAccum >= 1.0f && hWheel < SCROLL_STEP_CAP) {
+                  hWheel++;
+                  hScrollAccum -= 1.0f;
+                }
+                while (hScrollAccum <= -1.0f && hWheel > -SCROLL_STEP_CAP) {
+                  hWheel--;
+                  hScrollAccum += 1.0f;
                 }
 
                 if (connected && (wheel != 0 || hWheel != 0)) {
@@ -755,6 +802,12 @@ void handleAutoModeTouchpad() {
         haveLast = false;
         touchStableCount = 0;
         touchStartTime = 0;
+
+        // 双指滚动相关状态清零，避免下一次触摸继承上一次残留
+        vScrollAccum = 0.0f;
+        hScrollAccum = 0.0f;
+        dxScrollFilt = 0.0f;
+        dyScrollFilt = 0.0f;
       }
     }
 
