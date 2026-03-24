@@ -45,8 +45,8 @@ BleComboMouse    bleMouse(&bleKB);
 // =====================================================
 // 触控板鼠标移动参数
 // =====================================================
-const int MOVE_DIV = 55;      // 原来30，变大后整体更不敏感
-const int MOVE_CAP = 4;       // 原来7，限制单次最大移动
+const int MOVE_DIV = 40;      // 原来30，变大后整体更不敏感
+const int MOVE_CAP = 9;       // 原来7，限制单次最大移动
 const int MOTION_THRESH = 18; // 原来8，小抖动直接忽略
 bool INVERT_Y = false;  
 
@@ -610,8 +610,8 @@ void handleAutoModeTouchpad() {
 
   // 滚轮专用参数：故意设得比较钝一点
   const int SCROLL_THRESH = 20;
-  const int SCROLL_DIV    = 45;
-  const int SCROLL_CAP    = 3;
+  const int SCROLL_DIV    = 65;
+  const int SCROLL_CAP    = 6;
 
   if (digitalRead(RDY_PIN) != LOW) {   // 极性不对就改成 == LOW
     bool anyData = false;
@@ -663,8 +663,8 @@ void handleAutoModeTouchpad() {
                 // 哪个轴更明显，就只发那个轴的 scroll
                 if (abs(dy) > abs(dx) * 2) {
                   if (abs(dy) >= SCROLL_THRESH) {
-                    wheel = -dy / SCROLL_DIV;
-                    if (wheel == 0) wheel = (dy > 0) ? -1 : 1;
+                    wheel = dy / SCROLL_DIV;
+                    if (wheel == 0) wheel = (dy > 0) ? 1 : -1;
                     if (wheel >  SCROLL_CAP) wheel =  SCROLL_CAP;
                     if (wheel < -SCROLL_CAP) wheel = -SCROLL_CAP;
                   }
