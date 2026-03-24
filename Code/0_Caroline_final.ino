@@ -30,8 +30,8 @@ BleComboMouse    bleMouse(&bleKB);
 // buttons / LED
 #define LED_PIN      2
 #define BUTTON_BOOT  0    // BOOT（按下=LOW）
-#define BUTTON1_PIN  33   // mode toggle（按下=LOW）
-#define BUTTON2_PIN  32   // lock/unlock toggle（按下=LOW）
+#define BUTTON1_PIN  4   // mode toggle（按下=LOW）
+#define BUTTON2_PIN  5   // lock/unlock toggle（按下=LOW）
 
 // =====================================================
 // IQS5xx 常用寄存器
@@ -45,10 +45,10 @@ BleComboMouse    bleMouse(&bleKB);
 // =====================================================
 // 触控板鼠标移动参数
 // =====================================================
-const int MOVE_DIV = 30;
-const int MOVE_CAP = 7;
-const int MOTION_THRESH = 8;
-bool INVERT_Y = false;  // 上下反就改成 true
+const int MOVE_DIV = 55;      // 原来30，变大后整体更不敏感
+const int MOVE_CAP = 4;       // 原来7，限制单次最大移动
+const int MOTION_THRESH = 18; // 原来8，小抖动直接忽略
+bool INVERT_Y = false;  
 
 // =====================================================
 // BOOT 参数
@@ -600,13 +600,23 @@ void handleButton2() {
 // =====================================================
 // AUTO mode：处理 touchpad -> BLE mouse
 // =====================================================
+// AUTO mode：处理 touchpad -> BLE mouse
 void handleAutoModeTouchpad() {
   bool connected = bleKB.isConnected();
+
+  // 重新落指后的稳定计数
+  static uint8_t touchStableCount = 0;
+  const uint8_t TOUCH_SETTLE_FRAMES = 4;
+
+  // 滚轮专用参数：故意设得比较钝一点
+  const int SCROLL_THRESH = 20;
+  const int SCROLL_DIV    = 45;
+  const int SCROLL_CAP    = 3;
 
   if (digitalRead(RDY_PIN) != LOW) {   // 极性不对就改成 == LOW
     bool anyData = false;
 
-    // 手势：SINGLE_TAP -> 左键点击
+    // SINGLE_TAP -> 左键点击
     uint8_t ge0 = 0;
     if (iqs_read(REG_GESTURE_EVENTS0, &ge0, 1)) {
       anyData = true;
@@ -616,7 +626,7 @@ void handleAutoModeTouchpad() {
       }
     }
 
-    // 坐标 -> 鼠标移动
+    // 读手指数
     uint8_t nf = 0;
     if (iqs_read(REG_NUM_FINGERS, &nf, 1)) {
       if (nf > 0) {
@@ -627,34 +637,99 @@ void handleAutoModeTouchpad() {
         if (okx && oky) {
           anyData = true;
 
+          // 第一次接触 / 重新落指：只记录起点，不产生动作
           if (!haveLast) {
             lastX = x;
             lastY = y;
             haveLast = true;
+            touchStableCount = 0;
           } else {
-            int16_t dx = (int16_t)x - (int16_t)lastX;
-            int16_t dy = (int16_t)y - (int16_t)lastY;
-
-            if (abs(dx) > MOTION_THRESH || abs(dy) > MOTION_THRESH) {
-              int mx = dx / MOVE_DIV;
-              int my = dy / MOVE_DIV;
-
-              if (mx >  MOVE_CAP) mx =  MOVE_CAP;
-              if (mx < -MOVE_CAP) mx = -MOVE_CAP;
-              if (my >  MOVE_CAP) my =  MOVE_CAP;
-              if (my < -MOVE_CAP) my = -MOVE_CAP;
-
-              if (INVERT_Y) my = -my;
-
-              if (connected) bleMouse.move((int8_t)mx, (int8_t)my);
-
+            // 前几帧先稳定，不移动也不滚动
+            if (touchStableCount < TOUCH_SETTLE_FRAMES) {
               lastX = x;
               lastY = y;
+              touchStableCount++;
+            } else {
+              int16_t dx = (int16_t)x - (int16_t)lastX;
+              int16_t dy = (int16_t)y - (int16_t)lastY;
+
+              // =========================
+              // 双指：上下滚轮
+              // =========================
+              if (nf >= 2) {
+                int wheel = 0;
+                int hWheel = 0;
+
+                // 哪个轴更明显，就只发那个轴的 scroll
+                if (abs(dy) > abs(dx) * 2) {
+                  if (abs(dy) >= SCROLL_THRESH) {
+                    wheel = -dy / SCROLL_DIV;
+                    if (wheel == 0) wheel = (dy > 0) ? -1 : 1;
+                    if (wheel >  SCROLL_CAP) wheel =  SCROLL_CAP;
+                    if (wheel < -SCROLL_CAP) wheel = -SCROLL_CAP;
+                  }
+                } else if (abs(dx) > abs(dy) * 2) {
+                  if (abs(dx) >= SCROLL_THRESH) {
+                    hWheel = -dx / SCROLL_DIV;
+                    if (hWheel == 0) hWheel = (dx > 0) ? -1 : 1;
+                    if (hWheel >  SCROLL_CAP) hWheel =  SCROLL_CAP;
+                    if (hWheel < -SCROLL_CAP) hWheel = -SCROLL_CAP;
+                  }
+                }
+
+                if (connected && (wheel != 0 || hWheel != 0)) {
+                  bleMouse.move(0, 0, (int8_t)wheel, (int8_t)hWheel);
+                }
+
+                lastX = x;
+                lastY = y;
+              }
+
+              // =========================
+              // 单指：鼠标移动
+              // =========================
+              else {
+                // 轴向偏置：明显横向就压掉纵向抖动，明显纵向就压掉横向抖动
+                if (abs(dx) > abs(dy) * 2) {
+                  dy = 0;
+                } else if (abs(dy) > abs(dx) * 2) {
+                  dx = 0;
+                }
+
+                // 小抖动忽略
+                if (abs(dx) < MOTION_THRESH) dx = 0;
+                if (abs(dy) < MOTION_THRESH) dy = 0;
+
+                if (dx != 0 || dy != 0) {
+                  // 你之前已经确认过需要左右/上下都反转
+                  int mx = -dx / MOVE_DIV;
+                  int my = -dy / MOVE_DIV;
+
+                  // 防止除完变成 0
+                  if (dx != 0 && mx == 0) mx = (dx > 0) ? -1 : 1;
+                  if (dy != 0 && my == 0) my = (dy > 0) ? -1 : 1;
+
+                  if (mx >  MOVE_CAP) mx =  MOVE_CAP;
+                  if (mx < -MOVE_CAP) mx = -MOVE_CAP;
+                  if (my >  MOVE_CAP) my =  MOVE_CAP;
+                  if (my < -MOVE_CAP) my = -MOVE_CAP;
+
+                  if (connected) {
+                    bleMouse.move((int8_t)mx, (int8_t)my);
+                  }
+                }
+
+                // 每帧更新基准点，减少误差累计
+                lastX = x;
+                lastY = y;
+              }
             }
           }
         }
       } else {
+        // 手指离开：断开本次轨迹
         haveLast = false;
+        touchStableCount = 0;
       }
     }
 
