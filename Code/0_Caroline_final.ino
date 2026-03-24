@@ -78,6 +78,9 @@ bool skipManualCmdThisLoop = false;
 uint16_t lastX = 0, lastY = 0;
 bool haveLast = false;
 
+// 连续接触开始时间：用于区分“精细微调”还是“快速大范围移动”
+unsigned long touchStartTime = 0;
+
 // =====================================================
 // WiFi / TCP
 // =====================================================
@@ -643,6 +646,7 @@ void handleAutoModeTouchpad() {
             lastY = y;
             haveLast = true;
             touchStableCount = 0;
+            touchStartTime = millis();
           } else {
             // 前几帧先稳定，不移动也不滚动
             if (touchStableCount < TOUCH_SETTLE_FRAMES) {
@@ -701,18 +705,38 @@ void handleAutoModeTouchpad() {
                 if (abs(dy) < MOTION_THRESH) dy = 0;
 
                 if (dx != 0 || dy != 0) {
-                  // 你之前已经确认过需要左右/上下都反转
-                  int mx = -dx / MOVE_DIV;
-                  int my = -dy / MOVE_DIV;
+                  unsigned long touchAge = millis() - touchStartTime;
+
+                  // 连续接触越久，移动越小；刚落指时移动越大
+                  int moveDivNow = MOVE_DIV;
+                  int moveCapNow = MOVE_CAP;
+
+                  if (touchAge < 180) {
+                    // 刚落指：快速大范围移动
+                    moveDivNow = MOVE_DIV / 2;      // 更大位移
+                    if (moveDivNow < 1) moveDivNow = 1;
+                    moveCapNow = MOVE_CAP + 3;
+                  } else if (touchAge < 600) {
+                    // 中间阶段：正常速度
+                    moveDivNow = MOVE_DIV;
+                    moveCapNow = MOVE_CAP;
+                  } else {
+                    // 长按持续滑动：进入精细微调
+                    moveDivNow = MOVE_DIV * 2;      // 更小位移
+                    moveCapNow = (MOVE_CAP > 3) ? 3 : MOVE_CAP;
+                  }
+
+                  int mx = -dx / moveDivNow;
+                  int my = -dy / moveDivNow;
 
                   // 防止除完变成 0
                   if (dx != 0 && mx == 0) mx = (dx > 0) ? -1 : 1;
                   if (dy != 0 && my == 0) my = (dy > 0) ? -1 : 1;
 
-                  if (mx >  MOVE_CAP) mx =  MOVE_CAP;
-                  if (mx < -MOVE_CAP) mx = -MOVE_CAP;
-                  if (my >  MOVE_CAP) my =  MOVE_CAP;
-                  if (my < -MOVE_CAP) my = -MOVE_CAP;
+                  if (mx >  moveCapNow) mx =  moveCapNow;
+                  if (mx < -moveCapNow) mx = -moveCapNow;
+                  if (my >  moveCapNow) my =  moveCapNow;
+                  if (my < -moveCapNow) my = -moveCapNow;
 
                   if (connected) {
                     bleMouse.move((int8_t)mx, (int8_t)my);
@@ -730,6 +754,7 @@ void handleAutoModeTouchpad() {
         // 手指离开：断开本次轨迹
         haveLast = false;
         touchStableCount = 0;
+        touchStartTime = 0;
       }
     }
 
