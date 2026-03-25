@@ -1,0 +1,347 @@
+"use client";
+
+import React, { useEffect, useState } from "react";
+import {
+  ChevronRight,
+  Layers,
+  Lock,
+  PlayCircle,
+  RotateCcw,
+  Settings,
+  ShieldAlert,
+  Unlock,
+} from "lucide-react";
+
+// --- Sub-components ---
+
+const SectionHeading = ({ title, subtitle }: { title: string; subtitle: string }) => (
+  <div className="mb-12">
+    <h2 className="text-3xl font-bold tracking-tight text-slate-100">{title}</h2>
+    <div className="h-1 w-20 bg-blue-600 mt-2 mb-4"></div>
+    <p className="text-slate-400 max-w-2xl">{subtitle}</p>
+  </div>
+);
+
+// --- Main App Component ---
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<"Simulation" | "Demo Video">(
+    "Simulation"
+  );
+  const [systemMode, setSystemMode] = useState("AUTO");
+  const [isLocked, setIsLocked] = useState(false);
+  const [speedLimit, setSpeedLimit] = useState(true);
+  const [collision, setCollision] = useState(false);
+  
+  // Simulator State
+  const [targetPos, setTargetPos] = useState({ x: 350, y: 150 }); // User face position
+  const [armState, setArmState] = useState({ base: 0, elbow: 45, wrist: -30 });
+
+  // Simulate Auto-Tracking Logic
+  useEffect(() => {
+    if (systemMode === 'AUTO' && !isLocked && !collision) {
+      const interval = setInterval(() => {
+        setArmState(prev => ({
+          base: prev.base + (targetPos.y / 20 - 10 - prev.base) * 0.1,
+          elbow: prev.elbow + (targetPos.x / 10 - 20 - prev.elbow) * 0.1,
+          wrist: -prev.elbow / 2
+        }));
+      }, 50);
+      return () => clearInterval(interval);
+    }
+  }, [systemMode, isLocked, targetPos, collision]);
+
+  const handleManualMove = (dir: "F" | "B" | "L" | "R") => {
+    if (systemMode === "MANUAL" && !isLocked) {
+      setArmState(prev => {
+        switch(dir) {
+          case "F": return { ...prev, elbow: Math.min(prev.elbow + 5, 90) };
+          case "B": return { ...prev, elbow: Math.max(prev.elbow - 5, -20) };
+          case "L": return { ...prev, base: Math.max(prev.base - 5, -45) };
+          case "R": return { ...prev, base: Math.min(prev.base + 5, 45) };
+          default: return prev;
+        }
+      });
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 selection:bg-blue-500/30">
+      <nav className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/80 backdrop-blur-md">
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-white">H</div>
+            <span className="font-bold text-xl tracking-tighter uppercase">HeadsUp</span>
+          </div>
+          <a href="#demo" className="text-sm font-medium text-slate-400 hover:text-blue-400 transition-colors">
+            Interactive Demo Lab
+          </a>
+        </div>
+      </nav>
+
+      {/* Control Center (Simulator) */}
+      <section id="demo" className="py-24 px-6">
+        <div className="max-w-7xl mx-auto">
+          <SectionHeading 
+            title="Interactive Demo Lab" 
+            subtitle="Explore the system logic, simulated movement, and real-time response metrics."
+          />
+
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden flex flex-col lg:flex-row h-[700px]">
+            {/* Sidebar Controls */}
+            <div className="w-full lg:w-80 border-r border-slate-800 p-6 flex flex-col">
+              <div className="flex bg-slate-950 p-1 rounded-xl mb-8">
+                {(["Simulation", "Demo Video"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setActiveTab(tab)}
+                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${
+                      activeTab === tab
+                        ? "bg-slate-800 text-blue-400 shadow-lg"
+                        : "text-slate-500 hover:text-slate-300"
+                    }`}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-6 flex-1 overflow-y-auto pr-2">
+                {activeTab === "Simulation" && (
+                  <>
+                    <div>
+                      <label className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-3 block">System Mode</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button 
+                          onClick={() => setSystemMode("AUTO")}
+                          className={`py-2 px-3 rounded-lg border text-sm flex items-center justify-center gap-2 transition-all ${systemMode === "AUTO" ? "bg-blue-600/20 border-blue-500 text-blue-400" : "border-slate-800 hover:border-slate-700"}`}
+                        >
+                          <RotateCcw size={14}/> AUTO
+                        </button>
+                        <button 
+                          onClick={() => setSystemMode("MANUAL")}
+                          className={`py-2 px-3 rounded-lg border text-sm flex items-center justify-center gap-2 transition-all ${systemMode === "MANUAL" ? "bg-blue-600/20 border-blue-500 text-blue-400" : "border-slate-800 hover:border-slate-700"}`}
+                        >
+                          <Settings size={14}/> MANUAL
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-3 block">Hardware Locks</label>
+                      <button 
+                        onClick={() => setIsLocked(!isLocked)}
+                        className={`w-full py-3 rounded-xl border flex items-center justify-center gap-3 font-bold transition-all ${isLocked ? 'bg-red-500/10 border-red-500/50 text-red-400' : 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'}`}
+                      >
+                        {isLocked ? <Lock size={18}/> : <Unlock size={18}/>}
+                        {isLocked ? 'SYSTEM LOCKED' : 'SYSTEM ACTIVE'}
+                      </button>
+                    </div>
+
+                    {systemMode === "MANUAL" && (
+                      <div className="pt-4 border-t border-slate-800">
+                        <label className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-3 block">Manual Control (TCP)</label>
+                        <div className="grid grid-cols-3 gap-2 max-w-[180px] mx-auto">
+                          <div />
+                          <button onMouseDown={() => handleManualMove("F")} className="p-3 bg-slate-800 rounded-lg hover:bg-slate-700 active:scale-95"><ChevronRight className="-rotate-90"/></button>
+                          <div />
+                          <button onMouseDown={() => handleManualMove("L")} className="p-3 bg-slate-800 rounded-lg hover:bg-slate-700 active:scale-95"><ChevronRight className="rotate-180"/></button>
+                          <button onMouseDown={() => handleManualMove("B")} className="p-3 bg-slate-800 rounded-lg hover:bg-slate-700 active:scale-95"><ChevronRight className="rotate-90"/></button>
+                          <button onMouseDown={() => handleManualMove("R")} className="p-3 bg-slate-800 rounded-lg hover:bg-slate-700 active:scale-95"><ChevronRight /></button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="pt-4 border-t border-slate-800">
+                      <label className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-3 block">Safety Overrides</label>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-sm p-2 rounded-lg bg-slate-950">
+                          <span>Speed Limiter</span>
+                          <button onClick={() => setSpeedLimit(!speedLimit)} className={`w-10 h-5 rounded-full transition-colors relative ${speedLimit ? 'bg-blue-600' : 'bg-slate-700'}`}>
+                            <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${speedLimit ? 'right-1' : 'left-1'}`} />
+                          </button>
+                        </div>
+                        <button 
+                          onClick={() => setCollision(!collision)}
+                          className="w-full py-2 text-xs font-bold border border-slate-800 rounded-lg hover:bg-red-500/10 hover:border-red-500/50 transition-all"
+                        >
+                          SIMULATE COLLISION
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Status Bar */}
+              <div className="mt-auto pt-4 border-t border-slate-800">
+                <div className="flex items-center justify-between text-[10px] font-mono">
+                  <span className="text-slate-500 uppercase tracking-tighter">
+                    {activeTab === "Simulation" ? "Latency: 68ms" : "Demo media"}
+                  </span>
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    CONNECTED
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Display Area */}
+            <div className="flex-1 bg-slate-950 relative overflow-hidden flex flex-col">
+              {activeTab === "Simulation" ? (
+                <>
+                  <div className="p-4 border-b border-slate-900 flex justify-between items-center bg-slate-900/20">
+                    <div className="flex gap-4">
+                      <div className="text-[10px] font-mono">
+                        <span className="text-slate-500 block">BASE_JOINT</span>
+                        <span className="text-blue-400">{armState.base.toFixed(1)}°</span>
+                      </div>
+                      <div className="text-[10px] font-mono">
+                        <span className="text-slate-500 block">ELBOW_ANGLE</span>
+                        <span className="text-blue-400">{armState.elbow.toFixed(1)}°</span>
+                      </div>
+                    </div>
+                    {collision && (
+                      <div className="flex items-center gap-2 text-red-500 font-bold text-xs animate-pulse">
+                        <ShieldAlert size={14}/> COLLISION DETECTED
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 relative cursor-crosshair group"
+                    onMouseMove={(e) => {
+                      if (systemMode === "AUTO") {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        setTargetPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+                      }
+                    }}
+                  >
+                    {/* SVG SIMULATOR */}
+                    <svg className="w-full h-full" viewBox="0 0 600 400">
+                      <defs>
+                        <linearGradient id="armGrad" x1="0" y1="0" x2="1" y2="0">
+                          <stop offset="0%" stopColor="#1e293b" />
+                          <stop offset="100%" stopColor="#334155" />
+                        </linearGradient>
+                      </defs>
+                      
+                      {/* Grid Lines */}
+                      <g stroke="#1e293b" strokeWidth="1">
+                        {[...Array(10)].map((_, i) => (
+                          <React.Fragment key={i}>
+                            <line x1={i * 60} y1="0" x2={i * 60} y2="400" />
+                            <line x1="0" y1={i * 40} x2="600" y2={i * 40} />
+                          </React.Fragment>
+                        ))}
+                      </g>
+
+                      {/* The Robotic Arm */}
+                      <g transform={`translate(100, 300) rotate(${armState.base})`}>
+                        {/* Base */}
+                        <rect x="-30" y="0" width="60" height="20" fill="#0f172a" rx="4" />
+                        
+                        {/* Link 1 */}
+                        <g transform={`rotate(${armState.elbow})`}>
+                          <rect x="-10" y="-120" width="20" height="130" fill="url(#armGrad)" rx="10" />
+                          <circle cx="0" cy="0" r="12" fill="#3b82f6" />
+                          
+                          {/* Link 2 */}
+                          <g transform={`translate(0, -120) rotate(${armState.wrist})`}>
+                            <rect x="-8" y="-100" width="16" height="110" fill="url(#armGrad)" rx="8" />
+                            <circle cx="0" cy="0" r="10" fill="#3b82f6" />
+                            
+                            {/* Phone Holder */}
+                            <g transform={`translate(0, -100)`}>
+                              <rect x="-25" y="-45" width="50" height="10" fill="#1e293b" rx="2" />
+                              <rect x="-22" y="-95" width="44" height="90" fill="#020617" stroke="#334155" rx="4" />
+                              <rect x="-18" y="-90" width="36" height="80" fill="#3b82f6" fillOpacity="0.1" />
+                              <circle cx="0" cy="-80" r="2" fill="#3b82f6" />
+                            </g>
+                          </g>
+                        </g>
+                      </g>
+
+                      {/* Target / Face Placeholder */}
+                      {systemMode === "AUTO" && (
+                        <g transform={`translate(${targetPos.x}, ${targetPos.y})`}>
+                          <circle r="40" fill="white" fillOpacity="0.05" stroke="#3b82f6" strokeDasharray="4 4" className="animate-spin-slow" />
+                          <circle r="2" fill="#3b82f6" />
+                          <text y="55" textAnchor="middle" fill="#3b82f6" fontSize="10" fontWeight="bold">USER_FACE_TARGET</text>
+                        </g>
+                      )}
+                    </svg>
+
+                    {/* Info HUD */}
+                    <div className="absolute bottom-6 right-6 space-y-2 pointer-events-none">
+                      <div className="bg-slate-900/80 backdrop-blur border border-slate-800 p-3 rounded-lg flex items-center gap-3">
+                        <div className="p-2 bg-blue-500/20 rounded">
+                          <Layers size={16} className="text-blue-400"/>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500 font-bold uppercase">Pipeline</div>
+                          <div className="text-xs font-mono">CV_TRACKER_V4.2</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Tooltip Instruction */}
+                    <div className="absolute top-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-blue-600 text-white text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest pointer-events-none">
+                      Move mouse to simulate user movement
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1 p-6 sm:p-10">
+                  <div className="h-full rounded-2xl border border-slate-800 bg-slate-900/30 overflow-hidden flex flex-col">
+                    <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/40">
+                      <div className="flex items-center gap-2">
+                        <PlayCircle className="h-4 w-4 text-blue-400" />
+                        <span className="text-sm font-bold text-slate-100">
+                          Demo video
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+                        /public/demo.mp4
+                      </span>
+                    </div>
+                    <div className="flex-1 bg-slate-950 p-4 sm:p-6">
+                      <video
+                        className="h-full w-full rounded-xl border border-slate-800 bg-black"
+                        controls
+                        playsInline
+                        preload="metadata"
+                        src="/demo.mp4"
+                      />
+                      <p className="mt-3 text-xs text-slate-500">
+                        If the player is blank, add your file at{" "}
+                        <span className="font-mono text-slate-400">
+                          headsup-local/public/demo.mp4
+                        </span>{" "}
+                        (or change the <span className="font-mono">src</span>{" "}
+                        above).
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Global CSS for some custom animations */}
+      <style dangerouslySetInnerHTML={{ __html: `
+        @keyframes spin-slow {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow {
+          animation: spin-slow 8s linear infinite;
+        }
+        html { scroll-behavior: smooth; }
+      `}} />
+    </div>
+  );
+}
