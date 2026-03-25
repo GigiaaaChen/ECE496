@@ -126,11 +126,9 @@ export default function App() {
   const [isDraggingUser, setIsDraggingUser] = useState(false);
   const dragOffset = useRef({ x: 0, y: 0 });
 
-  const [target, setTarget] = useState<TargetState>({
-    x: 410,
-    y: 155,
-    lateral: 0,
-  });
+  // Separate the visible user from the mechanical tracking target
+  const [userTarget, setUserTarget] = useState<TargetState>({ x: 410, y: 155, lateral: 0 });
+  const [manualTarget, setManualTarget] = useState<TargetState>({ x: 410, y: 155, lateral: 0 });
 
   const [armState, setArmState] = useState<ArmAngles>({
     base: 0,
@@ -140,7 +138,15 @@ export default function App() {
   });
 
   const [trackingState, setTrackingState] = useState<"TRACKING" | "CLAMPED" | "LOCKED" | "COLLISION">("TRACKING");
-  const ikSolution = useMemo(() => solvePlanarIK(target.x, target.y), [target.x, target.y]);
+  
+  // Decide which target the arm should solve for
+  const activeTarget = systemMode === "AUTO" ? userTarget : manualTarget;
+  const ikSolution = useMemo(() => solvePlanarIK(activeTarget.x, activeTarget.y), [activeTarget.x, activeTarget.y]);
+
+  // Sync manual target when swapping to MANUAL so the arm doesn't suddenly jump
+  useEffect(() => {
+    if (systemMode === "MANUAL") setManualTarget(userTarget);
+  }, [systemMode, userTarget]);
 
   useEffect(() => {
     if (collision) {
@@ -158,14 +164,14 @@ export default function App() {
     if (systemMode !== "AUTO" || isLocked || collision) return;
 
     const interval = setInterval(() => {
-      const desiredBase = clamp(target.lateral * 0.9, BASE_MIN, BASE_MAX);
+      const desiredBase = clamp(userTarget.lateral * 0.9, BASE_MIN, BASE_MAX);
       const { forearmAngle } = forwardKinematics({
         ...armState,
         shoulder: ikSolution.shoulder,
         elbow: ikSolution.elbow,
       });
 
-      const desiredPhoneFacing = radToDeg(Math.atan2(BASE_Y - target.y, target.x - BASE_X));
+      const desiredPhoneFacing = radToDeg(Math.atan2(BASE_Y - userTarget.y, userTarget.x - BASE_X));
       const desiredWrist = clamp(desiredPhoneFacing - radToDeg(forearmAngle), WRIST_MIN, WRIST_MAX);
       const speedFactor = speedLimit ? 0.08 : 0.16;
 
@@ -178,25 +184,18 @@ export default function App() {
     }, 30);
 
     return () => clearInterval(interval);
-  }, [systemMode, isLocked, collision, speedLimit, target, ikSolution, armState]);
+  }, [systemMode, isLocked, collision, speedLimit, userTarget, ikSolution, armState]);
 
   const handleManualMove = (dir: "F" | "B" | "L" | "R") => {
     if (systemMode !== "MANUAL" || isLocked || collision) return;
-    setTarget((prev) => {
-      switch (dir) {
-        case "F": return { ...prev, x: clamp(prev.x + 18, 220, 520) };
-        case "B": return { ...prev, x: clamp(prev.x - 18, 220, 520) };
-        case "L": return { ...prev, lateral: clamp(prev.lateral - 12, -120, 120) };
-        case "R": return { ...prev, lateral: clamp(prev.lateral + 12, -120, 120) };
-        default: return prev;
-      }
-    });
+    
+    const nextTarget = { ...manualTarget };
+    if (dir === "F") nextTarget.x = clamp(nextTarget.x + 18, 220, 520);
+    if (dir === "B") nextTarget.x = clamp(nextTarget.x - 18, 220, 520);
+    if (dir === "L") nextTarget.lateral = clamp(nextTarget.lateral - 12, -120, 120);
+    if (dir === "R") nextTarget.lateral = clamp(nextTarget.lateral + 12, -120, 120);
 
-    const nextTarget = { ...target };
-    if (dir === "F") nextTarget.x += 18;
-    if (dir === "B") nextTarget.x -= 18;
-    if (dir === "L") nextTarget.lateral -= 12;
-    if (dir === "R") nextTarget.lateral += 12;
+    setManualTarget(nextTarget); // Updates internal arm target without moving user icon
 
     const manualIK = solvePlanarIK(nextTarget.x, nextTarget.y);
     const desiredBase = clamp(nextTarget.lateral * 0.9, BASE_MIN, BASE_MAX);
@@ -219,16 +218,14 @@ export default function App() {
     const svg = e.currentTarget.ownerSVGElement;
     if (!svg) return;
     
-    // Convert screen coordinates to SVG coordinates
     const pt = svg.createSVGPoint();
     pt.x = e.clientX;
     pt.y = e.clientY;
     const cursorPt = pt.matrixTransform(svg.getScreenCTM()?.inverse());
     
-    // Store offset so the head doesn't snap to the exact center of the cursor
     dragOffset.current = {
-      x: cursorPt.x - target.x,
-      y: cursorPt.y - target.y,
+      x: cursorPt.x - userTarget.x,
+      y: cursorPt.y - userTarget.y,
     };
     
     setIsDraggingUser(true);
@@ -245,11 +242,10 @@ export default function App() {
     pt.y = e.clientY;
     const cursorPt = pt.matrixTransform(svg.getScreenCTM()?.inverse());
     
-    // Apply the initial click offset and restrict to sofa bounds
     const newX = clamp(cursorPt.x - dragOffset.current.x, 260, 520);
     const newY = clamp(cursorPt.y - dragOffset.current.y, 80, 260);
     
-    setTarget((prev) => ({ ...prev, x: newX, y: newY }));
+    setUserTarget((prev) => ({ ...prev, x: newX, y: newY }));
   };
 
   const onPointerUp = (e: React.PointerEvent<SVGGElement>) => {
@@ -258,7 +254,7 @@ export default function App() {
   };
 
   const fk = forwardKinematics(armState);
-  const displayTarget = ikSolution.reachable ? { x: target.x, y: target.y } : ikSolution.clampedTarget;
+  const displayTarget = ikSolution.reachable ? { x: activeTarget.x, y: activeTarget.y } : ikSolution.clampedTarget;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 selection:bg-blue-500/30">
@@ -275,7 +271,7 @@ export default function App() {
         <div className="mx-auto max-w-7xl">
           <SectionHeading
             title="Interactive Demo Lab"
-            subtitle="Drag the user's head to adjust their position. The arm will recalculate kinematics dynamically."
+            subtitle="Drag the user avatar to adjust their position. Switch to MANUAL to override tracking with the remote."
           />
 
           <div className="flex h-[760px] flex-col overflow-hidden rounded-3xl border border-slate-800 bg-slate-900 lg:flex-row">
@@ -305,7 +301,7 @@ export default function App() {
                         <button onClick={() => setSystemMode("AUTO")} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm transition-all ${systemMode === "AUTO" ? "border-blue-500 bg-blue-600/20 text-blue-400" : "border-slate-800 hover:border-slate-700"}`}>
                           <RotateCcw size={14} /> AUTO
                         </button>
-                        <button onClick={() => setSystemMode("MANUAL")} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm transition-all ${systemMode === "MANUAL" ? "border-blue-500 bg-blue-600/20 text-blue-400" : "border-slate-800 hover:border-slate-700"}`}>
+                        <button onClick={() => setSystemMode("MANUAL")} className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm transition-all ${systemMode === "MANUAL" ? "border-amber-500 bg-amber-600/20 text-amber-400" : "border-slate-800 hover:border-slate-700"}`}>
                           <Settings size={14} /> MANUAL
                         </button>
                       </div>
@@ -321,12 +317,12 @@ export default function App() {
 
                     {systemMode === "MANUAL" && (
                       <div className="border-t border-slate-800 pt-4">
-                        <label className="mb-3 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Manual Control</label>
+                        <label className="mb-3 block text-[10px] font-bold uppercase tracking-widest text-slate-500">Manual Control Remote</label>
                         <div className="mx-auto grid max-w-[180px] grid-cols-3 gap-2">
-                          <div /><button onMouseDown={() => handleManualMove("F")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95"><ChevronRight className="-rotate-90" /></button><div />
-                          <button onMouseDown={() => handleManualMove("L")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95"><ChevronRight className="rotate-180" /></button>
-                          <button onMouseDown={() => handleManualMove("B")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95"><ChevronRight className="rotate-90" /></button>
-                          <button onMouseDown={() => handleManualMove("R")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95"><ChevronRight /></button>
+                          <div /><button onMouseDown={() => handleManualMove("F")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95 text-amber-500"><ChevronRight className="-rotate-90" /></button><div />
+                          <button onMouseDown={() => handleManualMove("L")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95 text-amber-500"><ChevronRight className="rotate-180" /></button>
+                          <button onMouseDown={() => handleManualMove("B")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95 text-amber-500"><ChevronRight className="rotate-90" /></button>
+                          <button onMouseDown={() => handleManualMove("R")} className="rounded-lg bg-slate-800 p-3 hover:bg-slate-700 active:scale-95 text-amber-500"><ChevronRight /></button>
                         </div>
                       </div>
                     )}
@@ -377,7 +373,7 @@ export default function App() {
                   {/* Indicator Overlay */}
                   <div className="pointer-events-none absolute left-1/2 top-24 -translate-x-1/2 rounded-full bg-slate-900/80 border border-slate-800 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 shadow-xl backdrop-blur transition-opacity flex items-center gap-3">
                      <div className={`h-1.5 w-1.5 rounded-full animate-pulse ${isDraggingUser ? 'bg-blue-500' : 'bg-slate-600'}`} />
-                     {isDraggingUser ? "Tracking user position..." : "Click and hold the user's head to move them"}
+                     {isDraggingUser ? "Tracking user position..." : systemMode === "AUTO" ? "Click and hold the user to move them" : "Manual override active"}
                   </div>
 
                   <div className="group relative flex-1">
@@ -405,65 +401,49 @@ export default function App() {
                         <rect x="480" y="160" width="100" height="118" rx="20" fill="#243248" />
                       </g>
 
-                      {/* --- DRAGGABLE USER MODEL --- */}
+                      {/* --- DRAGGABLE USER AVATAR MODEL --- */}
                       <g 
-                        transform={`translate(${target.x}, ${target.y})`}
+                        transform={`translate(${userTarget.x}, ${userTarget.y})`}
                         className={`cursor-grab touch-none ${isDraggingUser ? 'cursor-grabbing' : ''}`}
                         onPointerDown={onPointerDown}
                         onPointerMove={onPointerMove}
                         onPointerUp={onPointerUp}
                         onPointerCancel={onPointerUp}
                       >
-                        {/* Interactive Drag Bounding Area (Invisible, increases hit target) */}
-                        <circle cx="0" cy="0" r="45" fill="transparent" />
+                        {/* Interactive Drag Bounding Area (Invisible) */}
+                        <circle cx="0" cy="5" r="50" fill="transparent" />
 
-                        {/* Schematic Body Parts */}
+                        {/* Silhouette Body Elements */}
                         <g className={`transition-opacity ${isDraggingUser ? 'opacity-100' : 'opacity-80 group-hover:opacity-100'}`}>
-                           {/* Torso & Back Curve */}
-                           <path 
-                             d="M -5 35 Q -30 90, -10 130" 
-                             fill="none" 
-                             stroke="#475569" 
-                             strokeWidth="30" 
-                             strokeLinecap="round" 
-                           />
-                           {/* Lap / Thighs */}
-                           <line 
-                             x1="-15" y1="120" 
-                             x2="60" y2="125" 
-                             stroke="#475569" 
-                             strokeWidth="26" 
-                             strokeLinecap="round" 
-                           />
-                           {/* Neck */}
-                           <line 
-                             x1="-2" y1="22" 
-                             x2="-5" y2="40" 
-                             stroke="#64748b" 
-                             strokeWidth="12" 
-                             strokeLinecap="round" 
-                           />
-                           {/* Head */}
-                           <ellipse 
-                             cx="0" cy="0" 
-                             rx="16" ry="22" 
+                           {/* Head - Circle */}
+                           <circle 
+                             cx="0" cy="-20" r="18" 
                              fill={isDraggingUser ? "#1e293b" : "#334155"} 
                              stroke={isDraggingUser ? "#3b82f6" : "#64748b"} 
                              strokeWidth={isDraggingUser ? "3" : "2"} 
                              className="transition-colors"
                            />
+                           {/* Body - Dome Path */}
+                           <path 
+                             d="M -32 40 L -32 24 C -32 10, -18 6, 0 6 C 18 6, 32 10, 32 24 L 32 40 Z" 
+                             fill={isDraggingUser ? "#1e293b" : "#334155"} 
+                             stroke={isDraggingUser ? "#3b82f6" : "#64748b"} 
+                             strokeWidth={isDraggingUser ? "3" : "2"} 
+                             className="transition-colors" 
+                             strokeLinejoin="round"
+                           />
                         </g>
 
                         {/* Visual Hover/Drag Indicator */}
                         <circle 
-                          r="32" 
+                          cx="0" cy="5" r="44" 
                           fill="none" 
                           stroke="#3b82f6" 
                           strokeWidth="1" 
                           strokeDasharray="4 4" 
                           className={`animate-spin-slow transition-opacity ${isDraggingUser ? 'opacity-100' : 'opacity-0 group-hover:opacity-40'}`} 
                         />
-                        {isDraggingUser && <Move size={14} className="text-blue-500 absolute" x="-7" y="-7" />}
+                        {isDraggingUser && <Move size={14} className="text-blue-500 absolute" x="-7" y="-2" />}
                       </g>
 
                       {/* --- ROBOTIC ARM BASE --- */}
@@ -499,6 +479,14 @@ export default function App() {
                            <circle r="4" fill={ikSolution.reachable ? "#3b82f6" : "#f59e0b"} className="opacity-50" />
                         </g>
                       )}
+
+                      {/* Manual Jog Target Reticle */}
+                      {systemMode === "MANUAL" && (
+                        <g transform={`translate(${displayTarget.x}, ${displayTarget.y})`} className="pointer-events-none transition-transform">
+                           <circle r="8" fill="transparent" stroke="#f59e0b" strokeWidth="1" strokeDasharray="2 2" />
+                           <circle r="2" fill="#f59e0b" />
+                        </g>
+                      )}
                     </svg>
 
                     <div className="pointer-events-none absolute bottom-6 right-6 space-y-2">
@@ -506,7 +494,7 @@ export default function App() {
                         <div className="rounded bg-blue-500/20 p-2"><Layers size={16} className="text-blue-400" /></div>
                         <div>
                           <div className="text-[10px] font-bold uppercase text-slate-500">Pipeline</div>
-                          <div className="text-xs font-mono">ROARM_IK_POINTER_v2</div>
+                          <div className="text-xs font-mono">ROARM_IK_POINTER_v3</div>
                         </div>
                       </div>
                     </div>
