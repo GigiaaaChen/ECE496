@@ -4,18 +4,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Lock, RotateCcw, Unlock, User } from "lucide-react";
 
 type UserWorld = {
-  x: number;
-  z: number;
+  x: number; // cm, horizontal/depth in side view
+  z: number; // cm, height
 };
 
 type TcpPose = {
-  x: number;
-  z: number;
+  x: number; // cm
+  z: number; // cm
 };
 
 type JointState = {
   shoulder: number;
-  elbow: number; // signed internal angle, negative = elbow-up branch
+  elbow: number; // signed, negative = elbow-up branch
   wrist: number;
 };
 
@@ -34,38 +34,54 @@ type CameraFace = {
 const LOOP_HZ = 30;
 const DT = 1 / LOOP_HZ;
 
-// Goal: keep camera this far from user
-const TARGET_STANDOFF = 170;
+/**
+ * PHYSICS MODEL
+ * -------------
+ * We use centimeters consistently.
+ * The camera/TCP should stay TARGET_STANDOFF_CM away from the user's face
+ * along the world X direction in this side-view simulator.
+ */
+const TARGET_STANDOFF_CM = 50;
 
-// World bounds
-const USER_X_MIN = 380;
-const USER_X_MAX = 760;
-const USER_Z_MIN = 120;
-const USER_Z_MAX = 320;
+// User motion area (cm)
+const USER_X_MIN = 35;
+const USER_X_MAX = 120;
+const USER_Z_MIN = 90;
+const USER_Z_MAX = 180;
 
-const TCP_X_MIN = 180;
-const TCP_X_MAX = 620;
-const TCP_Z_MIN = 110;
-const TCP_Z_MAX = 330;
+// Robot TCP workspace (cm)
+const TCP_X_MIN = 10;
+const TCP_X_MAX = 95;
+const TCP_Z_MIN = 80;
+const TCP_Z_MAX = 185;
 
-const TCP_X0 = 320;
-const TCP_Z0 = 220;
+// Initial values
+const TCP_X0 = 40;
+const TCP_Z0 = 135;
+
+const USER_X0 = 90;
+const USER_Z0 = 135;
 
 // Camera frame
 const CAM_W = 320;
 const CAM_H = 220;
 
-// User pad
+// User control pad
 const PAD_W = 320;
 const PAD_H = 240;
 
-// Right-side arm view
+// Arm view
 const VIEW_W = 1000;
 const VIEW_H = 560;
+
+// Ground / drawing reference
+const GROUND_Y = 450;
+
+// Robot base in SCREEN coordinates
 const BASE_X = 860;
 const BASE_Y = 430;
 
-// Arm link lengths
+// Arm link lengths in SCREEN pixels for drawing / IK
 const L1 = 180;
 const L2 = 150;
 
@@ -73,14 +89,25 @@ const L2 = 150;
 const SHOULDER_MIN = 5;
 const SHOULDER_MAX = 155;
 
-// IMPORTANT:
-// use signed elbow angle so we can choose elbow-up branch.
-// negative elbow => "upper" / opposite-side bend
 const ELBOW_MIN = -175;
 const ELBOW_MAX = -12;
 
 const WRIST_MIN = -120;
 const WRIST_MAX = 120;
+
+// Shared world-to-screen mapping for the side view.
+// This is important: both user and TCP use the same mapping, so spacing is honest.
+const WORLD_X_NEAR = 0;
+const WORLD_X_FAR = 130;
+
+const WORLD_Z_MIN = 70;
+const WORLD_Z_MAX = 190;
+
+const SCREEN_X_LEFT = 180;
+const SCREEN_X_RIGHT = 860;
+
+const SCREEN_Y_TOP = 110;
+const SCREEN_Y_BOTTOM = 440;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
@@ -151,22 +178,41 @@ function pidUpdate(
   return clamp(out, gains.outMin, gains.outMax);
 }
 
-// World TCP -> screen target in right-side arm panel
+/**
+ * World -> screen for the side view
+ * x increases away from robot base toward the left side of the screen.
+ */
+function worldToScreenX(worldX: number) {
+  return mapRange(worldX, WORLD_X_NEAR, WORLD_X_FAR, SCREEN_X_RIGHT, SCREEN_X_LEFT);
+}
+
+function worldToScreenY(worldZ: number) {
+  return mapRange(worldZ, WORLD_Z_MIN, WORLD_Z_MAX, SCREEN_Y_BOTTOM, SCREEN_Y_TOP);
+}
+
 function tcpToScreen(tcp: TcpPose) {
   return {
-    x: mapRange(tcp.x, TCP_X_MIN, TCP_X_MAX, 700, 330),
-    y: mapRange(tcp.z, TCP_Z_MIN, TCP_Z_MAX, 430, 130),
+    x: worldToScreenX(tcp.x),
+    y: worldToScreenY(tcp.z),
   };
 }
 
-// IK target from tcp
-// Fixed to use ELBOW-UP / opposite branch
+function userToScreen(user: UserWorld) {
+  return {
+    x: worldToScreenX(user.x),
+    y: worldToScreenY(user.z),
+  };
+}
+
+/**
+ * Inverse kinematics from TCP pose.
+ * Uses elbow-up branch.
+ */
 function solveIkFromTcp(tcp: TcpPose): JointState {
   const target = tcpToScreen(tcp);
 
-  // target relative to base
-  const lx = BASE_X - target.x; // leftward positive
-  const ly = BASE_Y - target.y; // upward positive
+  const lx = BASE_X - target.x; // leftward positive from base
+  const ly = BASE_Y - target.y; // upward positive from base
 
   const dRaw = Math.sqrt(lx * lx + ly * ly);
   const minReach = Math.abs(L1 - L2) + 8;
@@ -179,8 +225,7 @@ function solveIkFromTcp(tcp: TcpPose): JointState {
     1
   );
 
-  // CHANGED:
-  // Use the opposite IK branch so the arm bends the other way ("upward")
+  // Elbow-up branch
   const elbowRad = -Math.acos(cosElbow);
 
   const shoulderRad =
@@ -190,7 +235,7 @@ function solveIkFromTcp(tcp: TcpPose): JointState {
   const shoulderDeg = clamp(deg(shoulderRad), SHOULDER_MIN, SHOULDER_MAX);
   const elbowDeg = clamp(deg(elbowRad), ELBOW_MIN, ELBOW_MAX);
 
-  // keep phone roughly vertical / facing user
+  // Keep phone roughly facing user / vertically reasonable
   const wristDeg = clamp(
     -(shoulderDeg + elbowDeg - 180) * 0.55,
     WRIST_MIN,
@@ -211,28 +256,33 @@ function forwardKinematics(j: JointState) {
   const x1 = BASE_X - L1 * Math.cos(s);
   const y1 = BASE_Y - L1 * Math.sin(s);
 
-  // With signed elbow, this naturally draws the selected branch.
   const x2 = x1 - L2 * Math.cos(s + e);
   const y2 = y1 - L2 * Math.sin(s + e);
 
   return { x1, y1, x2, y2 };
 }
 
-// Face location in camera frame depends ONLY on current tcp + user world location
+/**
+ * Camera frame model:
+ * - Face center offset depends on alignment error.
+ * - Face size depends on actual camera-user distance.
+ */
 function computeCameraFace(user: UserWorld, tcp: TcpPose): CameraFace {
-  // centered when tcp.x + TARGET_STANDOFF == user.x
-  // centered vertically when tcp.z == user.z
-  const errX = user.x - (tcp.x + TARGET_STANDOFF);
-  const errY = user.z - tcp.z;
+  const distanceX = user.x - tcp.x; // cm
+  const errX = distanceX - TARGET_STANDOFF_CM;
+  const errZ = user.z - tcp.z;
 
   const cx = CAM_W / 2;
   const cy = CAM_H / 2;
 
-  const faceX = clamp(cx + errX * 0.7, 28, CAM_W - 28);
-  const faceY = clamp(cy - errY * 1.0, 28, CAM_H - 28);
+  const faceX = clamp(cx + errX * 2.0, 28, CAM_W - 28);
+  const faceY = clamp(cy - errZ * 1.6, 28, CAM_H - 28);
 
-  const actualDistance = clamp(user.x - tcp.x, 80, 320);
-  const radius = clamp(mapRange(actualDistance, 80, 320, 34, 16), 16, 34);
+  const radius = clamp(
+    mapRange(distanceX, 25, 100, 34, 14),
+    14,
+    34
+  );
 
   return {
     x: faceX,
@@ -245,17 +295,15 @@ export default function Page() {
   const [locked, setLocked] = useState(false);
 
   const [userWorld, setUserWorld] = useState<UserWorld>({
-    x: 560,
-    z: 220,
+    x: USER_X0,
+    z: USER_Z0,
   });
 
-  // world-space camera/phone position
   const [tcp, setTcp] = useState<TcpPose>({
     x: TCP_X0,
     z: TCP_Z0,
   });
 
-  // actually drawn arm joints
   const [joints, setJoints] = useState<JointState>({
     shoulder: 42,
     elbow: -88,
@@ -270,50 +318,64 @@ export default function Page() {
   const draggingRef = useRef(false);
   const padRef = useRef<HTMLDivElement | null>(null);
 
-  // Main closed loop
   useEffect(() => {
     const interval = window.setInterval(() => {
       if (locked) return;
 
-      // 1. compute world-space image-centering error
-      const errX = userWorld.x - (tcp.x + TARGET_STANDOFF);
-      const errZ = userWorld.z - tcp.z;
+      /**
+       * DESIRED PHYSICS
+       * ---------------
+       * We want:
+       * tcp.x = user.x - TARGET_STANDOFF_CM
+       * tcp.z = user.z
+       *
+       * So if the user becomes too close, desired tcp.x moves backward.
+       * If the user is too far, desired tcp.x moves forward.
+       * Then we clamp to robot workspace.
+       */
+      const desiredTcpX = clamp(
+        userWorld.x - TARGET_STANDOFF_CM,
+        TCP_X_MIN,
+        TCP_X_MAX
+      );
 
-      const ex = applyDeadband(errX, 1.5);
-      const ez = applyDeadband(errZ, 1.5);
+      const desiredTcpZ = clamp(userWorld.z, TCP_Z_MIN, TCP_Z_MAX);
 
-      // 2. update tcp pose
+      const errX = desiredTcpX - tcp.x;
+      const errZ = desiredTcpZ - tcp.z;
+
+      const ex = applyDeadband(errX, 0.2);
+      const ez = applyDeadband(errZ, 0.2);
+
       const vx = pidUpdate(ex, DT, pidRef.current.x, {
-        kp: 2.2,
-        ki: 0.02,
-        kd: 0.5,
-        outMin: -260,
-        outMax: 260,
-        iMin: -140,
-        iMax: 140,
-        dAlpha: 0.25,
+        kp: 7.0,
+        ki: 0.08,
+        kd: 1.1,
+        outMin: -70,
+        outMax: 70,
+        iMin: -25,
+        iMax: 25,
+        dAlpha: 0.22,
       });
 
       const vz = pidUpdate(ez, DT, pidRef.current.z, {
-        kp: 2.8,
-        ki: 0.025,
-        kd: 0.55,
-        outMin: -260,
-        outMax: 260,
-        iMin: -140,
-        iMax: 140,
-        dAlpha: 0.25,
+        kp: 7.0,
+        ki: 0.08,
+        kd: 1.1,
+        outMin: -70,
+        outMax: 70,
+        iMin: -25,
+        iMax: 25,
+        dAlpha: 0.22,
       });
 
       const nextTcp: TcpPose = {
-        x: clamp(tcp.x + clamp(vx * DT, -10, 10), TCP_X_MIN, TCP_X_MAX),
-        z: clamp(tcp.z + clamp(vz * DT, -10, 10), TCP_Z_MIN, TCP_Z_MAX),
+        x: clamp(tcp.x + vx * DT, TCP_X_MIN, TCP_X_MAX),
+        z: clamp(tcp.z + vz * DT, TCP_Z_MIN, TCP_Z_MAX),
       };
 
-      // 3. solve target joints from NEW tcp
       const targetJoints = solveIkFromTcp(nextTcp);
 
-      // 4. animate drawn arm toward target joints
       const nextJoints: JointState = {
         shoulder: lerp(joints.shoulder, targetJoints.shoulder, 0.22),
         elbow: lerp(joints.elbow, targetJoints.elbow, 0.22),
@@ -332,8 +394,8 @@ export default function Page() {
 
   function resetAll() {
     setUserWorld({
-      x: 560,
-      z: 220,
+      x: USER_X0,
+      z: USER_Z0,
     });
 
     setTcp({
@@ -371,11 +433,16 @@ export default function Page() {
   const padUserY = mapRange(userWorld.z, USER_Z_MIN, USER_Z_MAX, PAD_H - 24, 24);
 
   const tcpScreen = tcpToScreen(tcp);
-  const userViewX = mapRange(userWorld.x, USER_X_MIN, USER_X_MAX, 700, 160);
-  const userViewY = mapRange(userWorld.z, USER_Z_MIN, USER_Z_MAX, 440, 130);
+  const userScreen = userToScreen(userWorld);
 
-  const errXDisplay = userWorld.x - (tcp.x + TARGET_STANDOFF);
-  const errZDisplay = userWorld.z - tcp.z;
+  const desiredTcpX = clamp(userWorld.x - TARGET_STANDOFF_CM, TCP_X_MIN, TCP_X_MAX);
+  const desiredTcpZ = clamp(userWorld.z, TCP_Z_MIN, TCP_Z_MAX);
+
+  const actualStandoff = userWorld.x - tcp.x;
+  const standoffError = actualStandoff - TARGET_STANDOFF_CM;
+
+  const atXLimit =
+    Math.abs(tcp.x - TCP_X_MIN) < 0.05 || Math.abs(tcp.x - TCP_X_MAX) < 0.05;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -384,8 +451,10 @@ export default function Page() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">HeadsUp Arm Simulator</h1>
             <p className="mt-2 text-slate-400">
-              Move the user on the left. The arm on the right should visibly move,
-              and the face in the camera frame should shift because of that arm motion.
+              The robot tries to keep the camera 50 cm away from the user.
+              If the user moves too close, the camera moves backward. If the
+              user moves farther away, the camera moves forward, unless the arm
+              hits its workspace limits.
             </p>
           </div>
 
@@ -431,6 +500,7 @@ export default function Page() {
                 className="rounded-2xl border border-slate-800 bg-slate-950"
               >
                 <rect x="0" y="0" width={CAM_W} height={CAM_H} fill="#020617" />
+
                 <line
                   x1={CAM_W / 2}
                   y1="0"
@@ -460,13 +530,13 @@ export default function Page() {
                 <circle cx={cameraFace.x} cy={cameraFace.y} r="4" fill="#60a5fa" />
 
                 <text x="12" y="18" fill="#94a3b8" fontSize="12" fontWeight="bold">
-                  Face position caused by current arm camera position
+                  Face position from real current camera-user geometry
                 </text>
               </svg>
 
               <p className="mt-3 text-sm text-slate-400">
-                The face does not move by itself. It moves only because the current arm
-                camera position changes.
+                The face size and offset depend on the actual camera distance and
+                alignment, not on an arbitrary drawing offset.
               </p>
             </div>
 
@@ -554,7 +624,7 @@ export default function Page() {
           <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-semibold">Robotic Arm Side View</h2>
-              <div className="text-sm text-slate-400">Arm motion should be visible</div>
+              <div className="text-sm text-slate-400">Robot maintains 50 cm standoff</div>
             </div>
 
             <svg
@@ -590,10 +660,30 @@ export default function Page() {
                 />
               ))}
 
-              <line x1="120" y1="442" x2="940" y2="442" stroke="#223247" strokeWidth="3" />
+              <line x1="120" y1={GROUND_Y} x2="940" y2={GROUND_Y} stroke="#223247" strokeWidth="3" />
 
-              {/* user in world side-view */}
-              <g transform={`translate(${userViewX}, ${userViewY})`}>
+              {/* target 50 cm marker */}
+              <line
+                x1={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                y1={120}
+                x2={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                y2={GROUND_Y}
+                stroke="#22c55e"
+                strokeDasharray="6 6"
+                strokeWidth="2"
+              />
+              <text
+                x={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM) - 36}
+                y={108}
+                fill="#86efac"
+                fontSize="12"
+                fontWeight="bold"
+              >
+                50 cm target
+              </text>
+
+              {/* user */}
+              <g transform={`translate(${userScreen.x}, ${userScreen.y})`}>
                 <circle cx="0" cy="-44" r="20" fill="rgba(96,165,250,0.35)" />
                 <rect
                   x="-16"
@@ -659,7 +749,7 @@ export default function Page() {
                 <circle cx="0" cy="-31" r="5" fill="#60a5fa" />
               </g>
 
-              {/* tcp target marker */}
+              {/* actual tcp marker */}
               <circle
                 cx={tcpScreen.x}
                 cy={tcpScreen.y}
@@ -670,23 +760,61 @@ export default function Page() {
                 strokeWidth="2"
               />
 
+              {/* desired tcp marker */}
+              <circle
+                cx={worldToScreenX(desiredTcpX)}
+                cy={worldToScreenY(desiredTcpZ)}
+                r="9"
+                fill="none"
+                stroke="#22c55e"
+                strokeDasharray="4 4"
+                strokeWidth="2"
+              />
+
+              {/* standoff line */}
+              <line
+                x1={tcpScreen.x}
+                y1={tcpScreen.y - 22}
+                x2={userScreen.x}
+                y2={userScreen.y - 22}
+                stroke="#f59e0b"
+                strokeWidth="2"
+                strokeDasharray="6 4"
+              />
+              <text
+                x={(tcpScreen.x + userScreen.x) / 2 - 28}
+                y={Math.min(tcpScreen.y, userScreen.y) - 30}
+                fill="#fbbf24"
+                fontSize="12"
+                fontWeight="bold"
+              >
+                {actualStandoff.toFixed(1)} cm
+              </text>
+
               <text x="28" y="32" fill="#94a3b8" fontSize="14" fontWeight="bold">
-                The arm drawing follows the current tcp pose every loop
+                Side-view spacing now matches the real world X/Z physics
               </text>
             </svg>
 
-            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-4">
+            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-5">
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">World Error X</div>
-                <div className="mt-1 font-mono text-blue-300">
-                  {errXDisplay.toFixed(1)}
+                <div className="text-sm text-slate-500">Target Standoff</div>
+                <div className="mt-1 font-mono text-emerald-300">
+                  {TARGET_STANDOFF_CM.toFixed(1)} cm
                 </div>
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">World Error Z</div>
+                <div className="text-sm text-slate-500">Actual Standoff</div>
                 <div className="mt-1 font-mono text-blue-300">
-                  {errZDisplay.toFixed(1)}
+                  {actualStandoff.toFixed(1)} cm
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                <div className="text-sm text-slate-500">Standoff Error</div>
+                <div className="mt-1 font-mono text-blue-300">
+                  {standoffError.toFixed(1)} cm
                 </div>
               </div>
 
@@ -707,9 +835,9 @@ export default function Page() {
             </div>
 
             <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
-              Expected behavior: after you drag the user, the arm should visibly move on
-              the right. As that arm motion changes the tcp position, the face in the
-              camera frame should gradually move back toward center.
+              Desired TCP is user.x - 50 cm. If that point is outside the robot
+              workspace, the arm stops at its limit.
+              {atXLimit ? " The arm is currently at an X workspace limit." : ""}
             </div>
           </div>
         </div>
