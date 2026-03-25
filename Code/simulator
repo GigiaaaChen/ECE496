@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Lock, RotateCcw, Unlock, User } from "lucide-react";
 
-type ControlMode = "auto" | "manual";
+type ControlMode = "auto" | "manual" | "demo";
 
 type UserWorld = {
   x: number; // cm: forward/back distance
@@ -107,6 +107,7 @@ const SCREEN_Y_TOP = 110;
 const SCREEN_Y_BOTTOM = 440;
 
 // In the user drawing, the head/eye center is 44 px above userScreen.y.
+// Convert that to world cm so TCP can target the same physical level.
 const USER_EYE_OFFSET_PX = 44;
 const PX_PER_CM_Y =
   (SCREEN_Y_BOTTOM - SCREEN_Y_TOP) / (WORLD_Z_MAX - WORLD_Z_MIN);
@@ -373,7 +374,7 @@ export default function Page() {
           x: clamp(tcp.x + vx * DT, TCP_X_MIN, TCP_X_MAX),
           z: clamp(tcp.z + vz * DT, TCP_Z_MIN, TCP_Z_MAX),
         };
-      } else {
+      } else if (mode === "manual") {
         const xDir =
           (manualInput.forward ? 1 : 0) + (manualInput.backward ? -1 : 0);
         const zDir =
@@ -384,6 +385,9 @@ export default function Page() {
           z: clamp(tcp.z + zDir * MANUAL_SPEED_Z * DT, TCP_Z_MIN, TCP_Z_MAX),
         };
 
+        pidRef.current.x = resetPid();
+        pidRef.current.z = resetPid();
+      } else {
         pidRef.current.x = resetPid();
         pidRef.current.z = resetPid();
       }
@@ -544,461 +548,504 @@ export default function Page() {
           >
             Manual
           </button>
+
+          <button
+            onClick={() => {
+              setMode("demo");
+              pidRef.current.x = resetPid();
+              pidRef.current.z = resetPid();
+              setManualInput({
+                forward: false,
+                backward: false,
+                up: false,
+                down: false,
+              });
+            }}
+            className={`rounded-2xl border px-5 py-3 text-sm font-semibold transition ${
+              mode === "demo"
+                ? "border-purple-500/60 bg-purple-500/15 text-purple-300"
+                : "border-slate-700 bg-slate-900 text-slate-300 hover:border-purple-500/50"
+            }`}
+          >
+            Demo Video
+          </button>
         </div>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
-          <div className="space-y-6">
-            <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
-              <div className="mb-3 flex items-center gap-2">
-                <Camera size={18} className="text-blue-400" />
-                <h2 className="text-lg font-semibold">Camera Frame</h2>
-              </div>
-
-              <svg
-                width="100%"
-                viewBox={`0 0 ${CAM_W} ${CAM_H}`}
-                className="rounded-2xl border border-slate-800 bg-slate-950"
-              >
-                <rect x="0" y="0" width={CAM_W} height={CAM_H} fill="#020617" />
-
-                <line
-                  x1={CAM_W / 2}
-                  y1="0"
-                  x2={CAM_W / 2}
-                  y2={CAM_H}
-                  stroke="#1e293b"
-                  strokeDasharray="5 5"
-                />
-                <line
-                  x1="0"
-                  y1={CAM_H / 2}
-                  x2={CAM_W}
-                  y2={CAM_H / 2}
-                  stroke="#1e293b"
-                  strokeDasharray="5 5"
-                />
-
-                <circle
-                  cx={cameraFace.x}
-                  cy={cameraFace.y}
-                  r={cameraFace.r}
-                  fill="rgba(59,130,246,0.10)"
-                  stroke="#3b82f6"
-                  strokeDasharray="5 5"
-                  strokeWidth="2"
-                />
-                <circle cx={cameraFace.x} cy={cameraFace.y} r="4" fill="#60a5fa" />
-
-                <text x="12" y="18" fill="#94a3b8" fontSize="12" fontWeight="bold">
-                  Face position from current camera-user geometry
-                </text>
-              </svg>
-
-              <p className="mt-3 text-sm text-slate-400">
-                In Auto mode, the robot matches eye height and standoff. In Manual
-                mode, the user can move, but it does not change the arm position.
+        {mode === "demo" ? (
+          <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-6 shadow-2xl shadow-black/20">
+            <div className="mb-4">
+              <h2 className="text-2xl font-semibold text-slate-100">Demo Video</h2>
+              <p className="mt-2 text-slate-400">
+                Upload your demo file into the public folder and name it demo.mp4.
               </p>
             </div>
 
-            <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
-              <div className="mb-3 flex items-center gap-2">
-                <User size={18} className="text-blue-400" />
-                <h2 className="text-lg font-semibold">User Position Control</h2>
-              </div>
-
-              <div
-                ref={padRef}
-                className="relative rounded-2xl border border-slate-800 bg-slate-950"
-                style={{ width: "100%", height: 260 }}
-                onMouseDown={(e) => {
-                  draggingRef.current = true;
-                  updateUserFromPointer(e.clientX, e.clientY);
-                }}
-                onMouseMove={(e) => {
-                  if (!draggingRef.current) return;
-                  updateUserFromPointer(e.clientX, e.clientY);
-                }}
-                onMouseUp={() => {
-                  draggingRef.current = false;
-                }}
-                onMouseLeave={() => {
-                  draggingRef.current = false;
-                }}
+            <div className="flex justify-center">
+              <video
+                controls
+                className="max-h-[75vh] w-auto max-w-full rounded-2xl border border-slate-800 bg-black object-contain"
               >
-                <svg width="100%" height="100%" viewBox={`0 0 ${PAD_W} ${PAD_H}`}>
-                  <rect x="0" y="0" width={PAD_W} height={PAD_H} fill="#020617" />
+                <source src="/demo.mov" type="video/quicktime" />
+                <source src="/demo.mp4" type="video/mp4" />
+                Your browser does not support the video tag.
+              </video>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
+            <div className="space-y-6">
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
+                <div className="mb-3 flex items-center gap-2">
+                  <Camera size={18} className="text-blue-400" />
+                  <h2 className="text-lg font-semibold">Camera Frame</h2>
+                </div>
 
-                  {Array.from({ length: 7 }).map((_, i) => (
-                    <line
-                      key={`pv-${i}`}
-                      x1={(i * PAD_W) / 6}
-                      y1="0"
-                      x2={(i * PAD_W) / 6}
-                      y2={PAD_H}
-                      stroke="#132032"
-                    />
-                  ))}
-                  {Array.from({ length: 6 }).map((_, i) => (
-                    <line
-                      key={`ph-${i}`}
-                      x1="0"
-                      y1={(i * PAD_H) / 5}
-                      x2={PAD_W}
-                      y2={(i * PAD_H) / 5}
-                      stroke="#132032"
-                    />
-                  ))}
+                <svg
+                  width="100%"
+                  viewBox={`0 0 ${CAM_W} ${CAM_H}`}
+                  className="rounded-2xl border border-slate-800 bg-slate-950"
+                >
+                  <rect x="0" y="0" width={CAM_W} height={CAM_H} fill="#020617" />
+
+                  <line
+                    x1={CAM_W / 2}
+                    y1="0"
+                    x2={CAM_W / 2}
+                    y2={CAM_H}
+                    stroke="#1e293b"
+                    strokeDasharray="5 5"
+                  />
+                  <line
+                    x1="0"
+                    y1={CAM_H / 2}
+                    x2={CAM_W}
+                    y2={CAM_H / 2}
+                    stroke="#1e293b"
+                    strokeDasharray="5 5"
+                  />
+
+                  <circle
+                    cx={cameraFace.x}
+                    cy={cameraFace.y}
+                    r={cameraFace.r}
+                    fill="rgba(59,130,246,0.10)"
+                    stroke="#3b82f6"
+                    strokeDasharray="5 5"
+                    strokeWidth="2"
+                  />
+                  <circle cx={cameraFace.x} cy={cameraFace.y} r="4" fill="#60a5fa" />
 
                   <text x="12" y="18" fill="#94a3b8" fontSize="12" fontWeight="bold">
-                    Drag the user icon
-                  </text>
-
-                  <g transform={`translate(${padUserX}, ${padUserY})`}>
-                    <circle r="22" fill="rgba(59,130,246,0.10)" stroke="#3b82f6" />
-                    <circle r="8" cy="-12" fill="#60a5fa" />
-                    <path
-                      d="M -10 12 Q 0 0 10 12"
-                      fill="none"
-                      stroke="#60a5fa"
-                      strokeWidth="4"
-                      strokeLinecap="round"
-                    />
-                    <path
-                      d="M -12 28 L 12 28"
-                      fill="none"
-                      stroke="#60a5fa"
-                      strokeWidth="4"
-                      strokeLinecap="round"
-                    />
-                  </g>
-
-                  <text x="12" y={PAD_H - 10} fill="#64748b" fontSize="11">
-                    Horizontal = forward/backward, Vertical = body height
+                    Face position from current camera-user geometry
                   </text>
                 </svg>
+
+                <p className="mt-3 text-sm text-slate-400">
+                  In Auto mode, the robot matches eye height and standoff. In Manual
+                  mode, the user can move, but it does not change the arm position.
+                </p>
+              </div>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
+                <div className="mb-3 flex items-center gap-2">
+                  <User size={18} className="text-blue-400" />
+                  <h2 className="text-lg font-semibold">User Position Control</h2>
+                </div>
+
+                <div
+                  ref={padRef}
+                  className="relative rounded-2xl border border-slate-800 bg-slate-950"
+                  style={{ width: "100%", height: 260 }}
+                  onMouseDown={(e) => {
+                    draggingRef.current = true;
+                    updateUserFromPointer(e.clientX, e.clientY);
+                  }}
+                  onMouseMove={(e) => {
+                    if (!draggingRef.current) return;
+                    updateUserFromPointer(e.clientX, e.clientY);
+                  }}
+                  onMouseUp={() => {
+                    draggingRef.current = false;
+                  }}
+                  onMouseLeave={() => {
+                    draggingRef.current = false;
+                  }}
+                >
+                  <svg width="100%" height="100%" viewBox={`0 0 ${PAD_W} ${PAD_H}`}>
+                    <rect x="0" y="0" width={PAD_W} height={PAD_H} fill="#020617" />
+
+                    {Array.from({ length: 7 }).map((_, i) => (
+                      <line
+                        key={`pv-${i}`}
+                        x1={(i * PAD_W) / 6}
+                        y1="0"
+                        x2={(i * PAD_W) / 6}
+                        y2={PAD_H}
+                        stroke="#132032"
+                      />
+                    ))}
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <line
+                        key={`ph-${i}`}
+                        x1="0"
+                        y1={(i * PAD_H) / 5}
+                        x2={PAD_W}
+                        y2={(i * PAD_H) / 5}
+                        stroke="#132032"
+                      />
+                    ))}
+
+                    <text x="12" y="18" fill="#94a3b8" fontSize="12" fontWeight="bold">
+                      Drag the user icon
+                    </text>
+
+                    <g transform={`translate(${padUserX}, ${padUserY})`}>
+                      <circle r="22" fill="rgba(59,130,246,0.10)" stroke="#3b82f6" />
+                      <circle r="8" cy="-12" fill="#60a5fa" />
+                      <path
+                        d="M -10 12 Q 0 0 10 12"
+                        fill="none"
+                        stroke="#60a5fa"
+                        strokeWidth="4"
+                        strokeLinecap="round"
+                      />
+                      <path
+                        d="M -12 28 L 12 28"
+                        fill="none"
+                        stroke="#60a5fa"
+                        strokeWidth="4"
+                        strokeLinecap="round"
+                      />
+                    </g>
+
+                    <text x="12" y={PAD_H - 10} fill="#64748b" fontSize="11">
+                      Horizontal = forward/backward, Vertical = body height
+                    </text>
+                  </svg>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-lg font-semibold">Manual Controls</h2>
+                  <div className="text-sm text-slate-400">
+                    {mode === "manual" ? "Enabled" : "Switch to Manual"}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div />
+                  <button
+                    onMouseDown={() => mode === "manual" && setManualInput((s) => ({ ...s, up: true }))}
+                    onMouseUp={() => setManualInput((s) => ({ ...s, up: false }))}
+                    onMouseLeave={() => setManualInput((s) => ({ ...s, up: false }))}
+                    onTouchStart={() => mode === "manual" && setManualInput((s) => ({ ...s, up: true }))}
+                    onTouchEnd={() => setManualInput((s) => ({ ...s, up: false }))}
+                    className={manualButtonClass(manualInput.up && mode === "manual")}
+                  >
+                    Up
+                  </button>
+                  <div />
+
+                  <button
+                    onMouseDown={() =>
+                      mode === "manual" && setManualInput((s) => ({ ...s, backward: true }))
+                    }
+                    onMouseUp={() => setManualInput((s) => ({ ...s, backward: false }))}
+                    onMouseLeave={() => setManualInput((s) => ({ ...s, backward: false }))}
+                    onTouchStart={() =>
+                      mode === "manual" && setManualInput((s) => ({ ...s, backward: true }))
+                    }
+                    onTouchEnd={() => setManualInput((s) => ({ ...s, backward: false }))}
+                    className={manualButtonClass(manualInput.backward && mode === "manual")}
+                  >
+                    Backward
+                  </button>
+
+                  <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-center text-sm text-slate-400">
+                    Hold buttons
+                  </div>
+
+                  <button
+                    onMouseDown={() =>
+                      mode === "manual" && setManualInput((s) => ({ ...s, forward: true }))
+                    }
+                    onMouseUp={() => setManualInput((s) => ({ ...s, forward: false }))}
+                    onMouseLeave={() => setManualInput((s) => ({ ...s, forward: false }))}
+                    onTouchStart={() =>
+                      mode === "manual" && setManualInput((s) => ({ ...s, forward: true }))
+                    }
+                    onTouchEnd={() => setManualInput((s) => ({ ...s, forward: false }))}
+                    className={manualButtonClass(manualInput.forward && mode === "manual")}
+                  >
+                    Forward
+                  </button>
+
+                  <div />
+                  <button
+                    onMouseDown={() => mode === "manual" && setManualInput((s) => ({ ...s, down: true }))}
+                    onMouseUp={() => setManualInput((s) => ({ ...s, down: false }))}
+                    onMouseLeave={() => setManualInput((s) => ({ ...s, down: false }))}
+                    onTouchStart={() => mode === "manual" && setManualInput((s) => ({ ...s, down: true }))}
+                    onTouchEnd={() => setManualInput((s) => ({ ...s, down: false }))}
+                    className={manualButtonClass(manualInput.down && mode === "manual")}
+                  >
+                    Down
+                  </button>
+                  <div />
+                </div>
+
+                <p className="mt-3 text-sm text-slate-400">
+                  Manual mode moves only the TCP. User movement does not affect the arm.
+                </p>
               </div>
             </div>
 
             <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Manual Controls</h2>
+                <h2 className="text-lg font-semibold">Robotic Arm Side View</h2>
                 <div className="text-sm text-slate-400">
-                  {mode === "manual" ? "Enabled" : "Switch to Manual"}
+                  {mode === "auto" ? "Auto tracking at 35 cm and eye height" : "Manual arm control"}
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div />
-                <button
-                  onMouseDown={() => mode === "manual" && setManualInput((s) => ({ ...s, up: true }))}
-                  onMouseUp={() => setManualInput((s) => ({ ...s, up: false }))}
-                  onMouseLeave={() => setManualInput((s) => ({ ...s, up: false }))}
-                  onTouchStart={() => mode === "manual" && setManualInput((s) => ({ ...s, up: true }))}
-                  onTouchEnd={() => setManualInput((s) => ({ ...s, up: false }))}
-                  className={manualButtonClass(manualInput.up && mode === "manual")}
-                >
-                  Up
-                </button>
-                <div />
+              <svg
+                width="100%"
+                viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+                className="rounded-2xl border border-slate-800 bg-slate-950"
+              >
+                <defs>
+                  <linearGradient id="armGrad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor="#334155" />
+                    <stop offset="100%" stopColor="#475569" />
+                  </linearGradient>
+                </defs>
 
-                <button
-                  onMouseDown={() =>
-                    mode === "manual" && setManualInput((s) => ({ ...s, backward: true }))
-                  }
-                  onMouseUp={() => setManualInput((s) => ({ ...s, backward: false }))}
-                  onMouseLeave={() => setManualInput((s) => ({ ...s, backward: false }))}
-                  onTouchStart={() =>
-                    mode === "manual" && setManualInput((s) => ({ ...s, backward: true }))
-                  }
-                  onTouchEnd={() => setManualInput((s) => ({ ...s, backward: false }))}
-                  className={manualButtonClass(manualInput.backward && mode === "manual")}
-                >
-                  Backward
-                </button>
-
-                <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-center text-sm text-slate-400">
-                  Hold buttons
-                </div>
-
-                <button
-                  onMouseDown={() =>
-                    mode === "manual" && setManualInput((s) => ({ ...s, forward: true }))
-                  }
-                  onMouseUp={() => setManualInput((s) => ({ ...s, forward: false }))}
-                  onMouseLeave={() => setManualInput((s) => ({ ...s, forward: false }))}
-                  onTouchStart={() =>
-                    mode === "manual" && setManualInput((s) => ({ ...s, forward: true }))
-                  }
-                  onTouchEnd={() => setManualInput((s) => ({ ...s, forward: false }))}
-                  className={manualButtonClass(manualInput.forward && mode === "manual")}
-                >
-                  Forward
-                </button>
-
-                <div />
-                <button
-                  onMouseDown={() => mode === "manual" && setManualInput((s) => ({ ...s, down: true }))}
-                  onMouseUp={() => setManualInput((s) => ({ ...s, down: false }))}
-                  onMouseLeave={() => setManualInput((s) => ({ ...s, down: false }))}
-                  onTouchStart={() => mode === "manual" && setManualInput((s) => ({ ...s, down: true }))}
-                  onTouchEnd={() => setManualInput((s) => ({ ...s, down: false }))}
-                  className={manualButtonClass(manualInput.down && mode === "manual")}
-                >
-                  Down
-                </button>
-                <div />
-              </div>
-
-              <p className="mt-3 text-sm text-slate-400">
-                Manual mode moves only the TCP. User movement does not affect the arm.
-              </p>
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Robotic Arm Side View</h2>
-              <div className="text-sm text-slate-400">
-                {mode === "auto" ? "Auto tracking at 35 cm and eye height" : "Manual arm control"}
-              </div>
-            </div>
-
-            <svg
-              width="100%"
-              viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
-              className="rounded-2xl border border-slate-800 bg-slate-950"
-            >
-              <defs>
-                <linearGradient id="armGrad" x1="0" y1="0" x2="1" y2="0">
-                  <stop offset="0%" stopColor="#334155" />
-                  <stop offset="100%" stopColor="#475569" />
-                </linearGradient>
-              </defs>
-
-              {Array.from({ length: 17 }).map((_, i) => (
-                <line
-                  key={`gv-${i}`}
-                  x1={i * 60}
-                  y1="0"
-                  x2={i * 60}
-                  y2={VIEW_H}
-                  stroke="#132032"
-                />
-              ))}
-              {Array.from({ length: 10 }).map((_, i) => (
-                <line
-                  key={`gh-${i}`}
-                  x1="0"
-                  y1={i * 56}
-                  x2={VIEW_W}
-                  y2={i * 56}
-                  stroke="#132032"
-                />
-              ))}
-
-              <line
-                x1="120"
-                y1={GROUND_Y}
-                x2="940"
-                y2={GROUND_Y}
-                stroke="#223247"
-                strokeWidth="3"
-              />
-
-              {mode === "auto" && (
-                <>
+                {Array.from({ length: 17 }).map((_, i) => (
                   <line
-                    x1={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
-                    y1={120}
-                    x2={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
-                    y2={GROUND_Y}
+                    key={`gv-${i}`}
+                    x1={i * 60}
+                    y1="0"
+                    x2={i * 60}
+                    y2={VIEW_H}
+                    stroke="#132032"
+                  />
+                ))}
+                {Array.from({ length: 10 }).map((_, i) => (
+                  <line
+                    key={`gh-${i}`}
+                    x1="0"
+                    y1={i * 56}
+                    x2={VIEW_W}
+                    y2={i * 56}
+                    stroke="#132032"
+                  />
+                ))}
+
+                <line
+                  x1="120"
+                  y1={GROUND_Y}
+                  x2="940"
+                  y2={GROUND_Y}
+                  stroke="#223247"
+                  strokeWidth="3"
+                />
+
+                {mode === "auto" && (
+                  <>
+                    <line
+                      x1={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                      y1={120}
+                      x2={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                      y2={GROUND_Y}
+                      stroke="#22c55e"
+                      strokeDasharray="6 6"
+                      strokeWidth="2"
+                    />
+                    <text
+                      x={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM) - 36}
+                      y={108}
+                      fill="#86efac"
+                      fontSize="12"
+                      fontWeight="bold"
+                    >
+                      35 cm target
+                    </text>
+                  </>
+                )}
+
+                {mode === "auto" && (
+                  <>
+                    <line
+                      x1="120"
+                      y1={userEyeScreen.y}
+                      x2="940"
+                      y2={userEyeScreen.y}
+                      stroke="#38bdf8"
+                      strokeDasharray="6 6"
+                      strokeWidth="2"
+                      opacity="0.85"
+                    />
+                    <text
+                      x={userEyeScreen.x - 28}
+                      y={userEyeScreen.y - 10}
+                      fill="#7dd3fc"
+                      fontSize="12"
+                      fontWeight="bold"
+                    >
+                      eye level
+                    </text>
+                  </>
+                )}
+
+                <g transform={`translate(${userScreen.x}, ${userScreen.y})`}>
+                  <circle cx="0" cy="-44" r="20" fill="rgba(96,165,250,0.35)" />
+                  <rect
+                    x="-16"
+                    y="-22"
+                    width="32"
+                    height="70"
+                    rx="14"
+                    fill="rgba(96,165,250,0.22)"
+                  />
+                  <text
+                    x="-18"
+                    y="-74"
+                    fill="#93c5fd"
+                    fontSize="14"
+                    fontWeight="bold"
+                  >
+                    USER
+                  </text>
+                </g>
+
+                <circle
+                  cx={userEyeScreen.x}
+                  cy={userEyeScreen.y}
+                  r="4"
+                  fill="#93c5fd"
+                />
+
+                <rect x={BASE_X - 24} y={BASE_Y + 6} width="48" height="22" rx="5" fill="#111827" />
+                <rect x={BASE_X - 16} y={BASE_Y - 48} width="32" height="54" rx="8" fill="#1e293b" />
+
+                <line
+                  x1={BASE_X}
+                  y1={BASE_Y}
+                  x2={fk.x1}
+                  y2={fk.y1}
+                  stroke="url(#armGrad)"
+                  strokeWidth="20"
+                  strokeLinecap="round"
+                />
+                <circle cx={BASE_X} cy={BASE_Y} r="14" fill="#3b82f6" />
+                <circle cx={fk.x1} cy={fk.y1} r="12" fill="#3b82f6" />
+
+                <line
+                  x1={fk.x1}
+                  y1={fk.y1}
+                  x2={fk.x2}
+                  y2={fk.y2}
+                  stroke="url(#armGrad)"
+                  strokeWidth="18"
+                  strokeLinecap="round"
+                />
+                <circle cx={fk.x2} cy={fk.y2} r="10" fill="#3b82f6" />
+
+                <g transform={`translate(${fk.x2}, ${fk.y2}) rotate(${joints.wrist})`}>
+                  <rect x="-18" y="-8" width="36" height="10" rx="3" fill="#1e293b" />
+                  <rect
+                    x="-18"
+                    y="-54"
+                    width="36"
+                    height="46"
+                    rx="6"
+                    fill="#020617"
+                    stroke="#334155"
+                    strokeWidth="2"
+                  />
+                  <circle cx="0" cy="-31" r="5" fill="#60a5fa" />
+                </g>
+
+                <circle
+                  cx={tcpScreen.x}
+                  cy={tcpScreen.y}
+                  r="14"
+                  fill="none"
+                  stroke="#60a5fa"
+                  strokeDasharray="5 5"
+                  strokeWidth="2"
+                />
+
+                {mode === "auto" && (
+                  <circle
+                    cx={worldToScreenX(desiredTcpX)}
+                    cy={worldToScreenY(desiredTcpZ)}
+                    r="9"
+                    fill="none"
                     stroke="#22c55e"
-                    strokeDasharray="6 6"
+                    strokeDasharray="4 4"
                     strokeWidth="2"
                   />
-                  <text
-                    x={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM) - 36}
-                    y={108}
-                    fill="#86efac"
-                    fontSize="12"
-                    fontWeight="bold"
-                  >
-                    35 cm target
-                  </text>
-                </>
-              )}
+                )}
 
-              {mode === "auto" && (
-                <>
-                  <line
-                    x1="120"
-                    y1={userEyeScreen.y}
-                    x2="940"
-                    y2={userEyeScreen.y}
-                    stroke="#38bdf8"
-                    strokeDasharray="6 6"
-                    strokeWidth="2"
-                    opacity="0.85"
-                  />
-                  <text
-                    x={userEyeScreen.x - 28}
-                    y={userEyeScreen.y - 10}
-                    fill="#7dd3fc"
-                    fontSize="12"
-                    fontWeight="bold"
-                  >
-                    eye level
-                  </text>
-                </>
-              )}
-
-              <g transform={`translate(${userScreen.x}, ${userScreen.y})`}>
-                <circle cx="0" cy="-44" r="20" fill="rgba(96,165,250,0.35)" />
-                <rect
-                  x="-16"
-                  y="-22"
-                  width="32"
-                  height="70"
-                  rx="14"
-                  fill="rgba(96,165,250,0.22)"
+                <line
+                  x1={tcpScreen.x}
+                  y1={tcpScreen.y}
+                  x2={userEyeScreen.x}
+                  y2={userEyeScreen.y}
+                  stroke="#f59e0b"
+                  strokeWidth="2"
+                  strokeDasharray="6 4"
                 />
                 <text
-                  x="-18"
-                  y="-74"
-                  fill="#93c5fd"
-                  fontSize="14"
+                  x={(tcpScreen.x + userEyeScreen.x) / 2 - 28}
+                  y={Math.min(tcpScreen.y, userEyeScreen.y) - 12}
+                  fill="#fbbf24"
+                  fontSize="12"
                   fontWeight="bold"
                 >
-                  USER
-                </text>
-              </g>
-
-              <circle
-                cx={userEyeScreen.x}
-                cy={userEyeScreen.y}
-                r="4"
-                fill="#93c5fd"
-              />
-
-              <rect x={BASE_X - 24} y={BASE_Y + 6} width="48" height="22" rx="5" fill="#111827" />
-              <rect x={BASE_X - 16} y={BASE_Y - 48} width="32" height="54" rx="8" fill="#1e293b" />
-
-              <line
-                x1={BASE_X}
-                y1={BASE_Y}
-                x2={fk.x1}
-                y2={fk.y1}
-                stroke="url(#armGrad)"
-                strokeWidth="20"
-                strokeLinecap="round"
-              />
-              <circle cx={BASE_X} cy={BASE_Y} r="14" fill="#3b82f6" />
-              <circle cx={fk.x1} cy={fk.y1} r="12" fill="#3b82f6" />
-
-              <line
-                x1={fk.x1}
-                y1={fk.y1}
-                x2={fk.x2}
-                y2={fk.y2}
-                stroke="url(#armGrad)"
-                strokeWidth="18"
-                strokeLinecap="round"
-              />
-              <circle cx={fk.x2} cy={fk.y2} r="10" fill="#3b82f6" />
-
-              <g transform={`translate(${fk.x2}, ${fk.y2}) rotate(${joints.wrist})`}>
-                <rect x="-18" y="-8" width="36" height="10" rx="3" fill="#1e293b" />
-                <rect
-                  x="-18"
-                  y="-54"
-                  width="36"
-                  height="46"
-                  rx="6"
-                  fill="#020617"
-                  stroke="#334155"
-                  strokeWidth="2"
-                />
-                <circle cx="0" cy="-31" r="5" fill="#60a5fa" />
-              </g>
-
-              <circle
-                cx={tcpScreen.x}
-                cy={tcpScreen.y}
-                r="14"
-                fill="none"
-                stroke="#60a5fa"
-                strokeDasharray="5 5"
-                strokeWidth="2"
-              />
-
-              {mode === "auto" && (
-                <circle
-                  cx={worldToScreenX(desiredTcpX)}
-                  cy={worldToScreenY(desiredTcpZ)}
-                  r="9"
-                  fill="none"
-                  stroke="#22c55e"
-                  strokeDasharray="4 4"
-                  strokeWidth="2"
-                />
-              )}
-
-              <line
-                x1={tcpScreen.x}
-                y1={tcpScreen.y}
-                x2={userEyeScreen.x}
-                y2={userEyeScreen.y}
-                stroke="#f59e0b"
-                strokeWidth="2"
-                strokeDasharray="6 4"
-              />
-              <text
-                x={(tcpScreen.x + userEyeScreen.x) / 2 - 28}
-                y={Math.min(tcpScreen.y, userEyeScreen.y) - 12}
-                fill="#fbbf24"
-                fontSize="12"
-                fontWeight="bold"
-              >
-                {actualStandoff.toFixed(1)} cm
-              </text>
-
-              <text x="28" y="32" fill="#94a3b8" fontSize="14" fontWeight="bold">
-                {mode === "auto"
-                  ? "Auto: robot tracks user eye height and standoff"
-                  : "Manual: user can move, but arm ignores user position"}
-              </text>
-            </svg>
-
-            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-3">
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">Mode</div>
-                <div className="mt-1 font-mono text-blue-300">
-                  {mode === "auto" ? "AUTO" : "MANUAL"}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">Target Standoff</div>
-                <div className="mt-1 font-mono text-emerald-300">
-                  {TARGET_STANDOFF_CM.toFixed(1)} cm
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">Actual Standoff</div>
-                <div className="mt-1 font-mono text-blue-300">
                   {actualStandoff.toFixed(1)} cm
+                </text>
+
+                <text x="28" y="32" fill="#94a3b8" fontSize="14" fontWeight="bold">
+                  {mode === "auto"
+                    ? "Auto: robot tracks user eye height and standoff"
+                    : "Manual: user can move, but arm ignores user position"}
+                </text>
+              </svg>
+
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                  <div className="text-sm text-slate-500">Mode</div>
+                  <div className="mt-1 font-mono text-blue-300">
+                    {mode === "auto" ? "AUTO" : "MANUAL"}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                  <div className="text-sm text-slate-500">Target Standoff</div>
+                  <div className="mt-1 font-mono text-emerald-300">
+                    {TARGET_STANDOFF_CM.toFixed(1)} cm
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                  <div className="text-sm text-slate-500">Actual Standoff</div>
+                  <div className="mt-1 font-mono text-blue-300">
+                    {actualStandoff.toFixed(1)} cm
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
-              {mode === "auto"
-                ? `Desired TCP is user.x - ${TARGET_STANDOFF_CM} cm and user eye height. If that point is outside the workspace, the arm stops at its limit${atXLimit ? ". The arm is currently at an X workspace limit." : "."}`
-                : "Manual mode directly jogs the TCP in X and Z. Forward/backward changes X. Up/down changes Z. User movement does not affect the arm."}
+              <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
+                {mode === "auto"
+                  ? `Desired TCP is user.x - ${TARGET_STANDOFF_CM} cm and user eye height. If that point is outside the workspace, the arm stops at its limit${atXLimit ? ". The arm is currently at an X workspace limit." : "."}`
+                  : "Manual mode directly jogs the TCP in X and Z. Forward/backward changes X. Up/down changes Z. User movement does not affect the arm."}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
