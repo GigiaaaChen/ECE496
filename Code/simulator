@@ -3,9 +3,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Lock, RotateCcw, Unlock, User } from "lucide-react";
 
+type ControlMode = "auto" | "manual";
+
 type UserWorld = {
-  x: number; // cm, horizontal/depth in side view
-  z: number; // cm, height
+  x: number; // cm: forward/back distance
+  z: number; // cm: body-anchor height
 };
 
 type TcpPose = {
@@ -34,14 +36,7 @@ type CameraFace = {
 const LOOP_HZ = 30;
 const DT = 1 / LOOP_HZ;
 
-/**
- * PHYSICS MODEL
- * -------------
- * We use centimeters consistently.
- * The camera/TCP should stay TARGET_STANDOFF_CM away from the user's face
- * along the world X direction in this side-view simulator.
- */
-const TARGET_STANDOFF_CM = 50;
+const TARGET_STANDOFF_CM = 35;
 
 // User motion area (cm)
 const USER_X_MIN = 35;
@@ -62,6 +57,10 @@ const TCP_Z0 = 135;
 const USER_X0 = 90;
 const USER_Z0 = 135;
 
+// Manual jogging speed (cm/s)
+const MANUAL_SPEED_X = 45;
+const MANUAL_SPEED_Z = 45;
+
 // Camera frame
 const CAM_W = 320;
 const CAM_H = 220;
@@ -74,14 +73,13 @@ const PAD_H = 240;
 const VIEW_W = 1000;
 const VIEW_H = 560;
 
-// Ground / drawing reference
 const GROUND_Y = 450;
 
-// Robot base in SCREEN coordinates
+// Robot base in screen coordinates
 const BASE_X = 860;
 const BASE_Y = 430;
 
-// Arm link lengths in SCREEN pixels for drawing / IK
+// Arm link lengths in screen pixels
 const L1 = 180;
 const L2 = 150;
 
@@ -95,8 +93,7 @@ const ELBOW_MAX = -12;
 const WRIST_MIN = -120;
 const WRIST_MAX = 120;
 
-// Shared world-to-screen mapping for the side view.
-// This is important: both user and TCP use the same mapping, so spacing is honest.
+// Shared world-to-screen mapping
 const WORLD_X_NEAR = 0;
 const WORLD_X_FAR = 130;
 
@@ -108,6 +105,13 @@ const SCREEN_X_RIGHT = 860;
 
 const SCREEN_Y_TOP = 110;
 const SCREEN_Y_BOTTOM = 440;
+
+// In the user drawing, the head/eye center is 44 px above userScreen.y.
+// Convert that to world cm so TCP can target the same physical level.
+const USER_EYE_OFFSET_PX = 44;
+const PX_PER_CM_Y =
+  (SCREEN_Y_BOTTOM - SCREEN_Y_TOP) / (WORLD_Z_MAX - WORLD_Z_MIN);
+const USER_EYE_OFFSET_CM = USER_EYE_OFFSET_PX / PX_PER_CM_Y;
 
 function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
@@ -178,10 +182,6 @@ function pidUpdate(
   return clamp(out, gains.outMin, gains.outMax);
 }
 
-/**
- * World -> screen for the side view
- * x increases away from robot base toward the left side of the screen.
- */
 function worldToScreenX(worldX: number) {
   return mapRange(worldX, WORLD_X_NEAR, WORLD_X_FAR, SCREEN_X_RIGHT, SCREEN_X_LEFT);
 }
@@ -204,15 +204,22 @@ function userToScreen(user: UserWorld) {
   };
 }
 
-/**
- * Inverse kinematics from TCP pose.
- * Uses elbow-up branch.
- */
+function getUserEyeWorldZ(user: UserWorld) {
+  return user.z + USER_EYE_OFFSET_CM;
+}
+
+function getUserEyeScreen(user: UserWorld) {
+  return {
+    x: worldToScreenX(user.x),
+    y: worldToScreenY(getUserEyeWorldZ(user)),
+  };
+}
+
 function solveIkFromTcp(tcp: TcpPose): JointState {
   const target = tcpToScreen(tcp);
 
-  const lx = BASE_X - target.x; // leftward positive from base
-  const ly = BASE_Y - target.y; // upward positive from base
+  const lx = BASE_X - target.x;
+  const ly = BASE_Y - target.y;
 
   const dRaw = Math.sqrt(lx * lx + ly * ly);
   const minReach = Math.abs(L1 - L2) + 8;
@@ -225,7 +232,6 @@ function solveIkFromTcp(tcp: TcpPose): JointState {
     1
   );
 
-  // Elbow-up branch
   const elbowRad = -Math.acos(cosElbow);
 
   const shoulderRad =
@@ -235,7 +241,6 @@ function solveIkFromTcp(tcp: TcpPose): JointState {
   const shoulderDeg = clamp(deg(shoulderRad), SHOULDER_MIN, SHOULDER_MAX);
   const elbowDeg = clamp(deg(elbowRad), ELBOW_MIN, ELBOW_MAX);
 
-  // Keep phone roughly facing user / vertically reasonable
   const wristDeg = clamp(
     -(shoulderDeg + elbowDeg - 180) * 0.55,
     WRIST_MIN,
@@ -262,15 +267,11 @@ function forwardKinematics(j: JointState) {
   return { x1, y1, x2, y2 };
 }
 
-/**
- * Camera frame model:
- * - Face center offset depends on alignment error.
- * - Face size depends on actual camera-user distance.
- */
 function computeCameraFace(user: UserWorld, tcp: TcpPose): CameraFace {
-  const distanceX = user.x - tcp.x; // cm
+  const userEyeZ = getUserEyeWorldZ(user);
+  const distanceX = user.x - tcp.x;
   const errX = distanceX - TARGET_STANDOFF_CM;
-  const errZ = user.z - tcp.z;
+  const errZ = userEyeZ - tcp.z;
 
   const cx = CAM_W / 2;
   const cy = CAM_H / 2;
@@ -278,11 +279,7 @@ function computeCameraFace(user: UserWorld, tcp: TcpPose): CameraFace {
   const faceX = clamp(cx + errX * 2.0, 28, CAM_W - 28);
   const faceY = clamp(cy - errZ * 1.6, 28, CAM_H - 28);
 
-  const radius = clamp(
-    mapRange(distanceX, 25, 100, 34, 14),
-    14,
-    34
-  );
+  const radius = clamp(mapRange(distanceX, 20, 100, 36, 14), 14, 36);
 
   return {
     x: faceX,
@@ -292,6 +289,7 @@ function computeCameraFace(user: UserWorld, tcp: TcpPose): CameraFace {
 }
 
 export default function Page() {
+  const [mode, setMode] = useState<ControlMode>("auto");
   const [locked, setLocked] = useState(false);
 
   const [userWorld, setUserWorld] = useState<UserWorld>({
@@ -310,6 +308,13 @@ export default function Page() {
     wrist: 0,
   });
 
+  const [manualInput, setManualInput] = useState({
+    forward: false,
+    backward: false,
+    up: false,
+    down: false,
+  });
+
   const pidRef = useRef({
     x: resetPid(),
     z: resetPid(),
@@ -322,57 +327,68 @@ export default function Page() {
     const interval = window.setInterval(() => {
       if (locked) return;
 
-      /**
-       * DESIRED PHYSICS
-       * ---------------
-       * We want:
-       * tcp.x = user.x - TARGET_STANDOFF_CM
-       * tcp.z = user.z
-       *
-       * So if the user becomes too close, desired tcp.x moves backward.
-       * If the user is too far, desired tcp.x moves forward.
-       * Then we clamp to robot workspace.
-       */
-      const desiredTcpX = clamp(
-        userWorld.x - TARGET_STANDOFF_CM,
-        TCP_X_MIN,
-        TCP_X_MAX
-      );
+      let nextTcp: TcpPose = tcp;
 
-      const desiredTcpZ = clamp(userWorld.z, TCP_Z_MIN, TCP_Z_MAX);
+      if (mode === "auto") {
+        const desiredTcpX = clamp(
+          userWorld.x - TARGET_STANDOFF_CM,
+          TCP_X_MIN,
+          TCP_X_MAX
+        );
 
-      const errX = desiredTcpX - tcp.x;
-      const errZ = desiredTcpZ - tcp.z;
+        // Revised: target eye level, not body anchor level
+        const desiredTcpZ = clamp(
+          getUserEyeWorldZ(userWorld),
+          TCP_Z_MIN,
+          TCP_Z_MAX
+        );
 
-      const ex = applyDeadband(errX, 0.2);
-      const ez = applyDeadband(errZ, 0.2);
+        const errX = desiredTcpX - tcp.x;
+        const errZ = desiredTcpZ - tcp.z;
 
-      const vx = pidUpdate(ex, DT, pidRef.current.x, {
-        kp: 7.0,
-        ki: 0.08,
-        kd: 1.1,
-        outMin: -70,
-        outMax: 70,
-        iMin: -25,
-        iMax: 25,
-        dAlpha: 0.22,
-      });
+        const ex = applyDeadband(errX, 0.2);
+        const ez = applyDeadband(errZ, 0.2);
 
-      const vz = pidUpdate(ez, DT, pidRef.current.z, {
-        kp: 7.0,
-        ki: 0.08,
-        kd: 1.1,
-        outMin: -70,
-        outMax: 70,
-        iMin: -25,
-        iMax: 25,
-        dAlpha: 0.22,
-      });
+        const vx = pidUpdate(ex, DT, pidRef.current.x, {
+          kp: 7.0,
+          ki: 0.08,
+          kd: 1.1,
+          outMin: -70,
+          outMax: 70,
+          iMin: -25,
+          iMax: 25,
+          dAlpha: 0.22,
+        });
 
-      const nextTcp: TcpPose = {
-        x: clamp(tcp.x + vx * DT, TCP_X_MIN, TCP_X_MAX),
-        z: clamp(tcp.z + vz * DT, TCP_Z_MIN, TCP_Z_MAX),
-      };
+        const vz = pidUpdate(ez, DT, pidRef.current.z, {
+          kp: 7.0,
+          ki: 0.08,
+          kd: 1.1,
+          outMin: -70,
+          outMax: 70,
+          iMin: -25,
+          iMax: 25,
+          dAlpha: 0.22,
+        });
+
+        nextTcp = {
+          x: clamp(tcp.x + vx * DT, TCP_X_MIN, TCP_X_MAX),
+          z: clamp(tcp.z + vz * DT, TCP_Z_MIN, TCP_Z_MAX),
+        };
+      } else {
+        const xDir =
+          (manualInput.forward ? 1 : 0) + (manualInput.backward ? -1 : 0);
+        const zDir =
+          (manualInput.up ? 1 : 0) + (manualInput.down ? -1 : 0);
+
+        nextTcp = {
+          x: clamp(tcp.x + xDir * MANUAL_SPEED_X * DT, TCP_X_MIN, TCP_X_MAX),
+          z: clamp(tcp.z + zDir * MANUAL_SPEED_Z * DT, TCP_Z_MIN, TCP_Z_MAX),
+        };
+
+        pidRef.current.x = resetPid();
+        pidRef.current.z = resetPid();
+      }
 
       const targetJoints = solveIkFromTcp(nextTcp);
 
@@ -387,7 +403,7 @@ export default function Page() {
     }, 1000 / LOOP_HZ);
 
     return () => window.clearInterval(interval);
-  }, [locked, tcp, joints, userWorld]);
+  }, [locked, mode, tcp, joints, userWorld, manualInput]);
 
   const fk = useMemo(() => forwardKinematics(joints), [joints]);
   const cameraFace = useMemo(() => computeCameraFace(userWorld, tcp), [userWorld, tcp]);
@@ -407,6 +423,14 @@ export default function Page() {
       shoulder: 42,
       elbow: -88,
       wrist: 0,
+    });
+
+    setMode("auto");
+    setManualInput({
+      forward: false,
+      backward: false,
+      up: false,
+      down: false,
     });
 
     pidRef.current.x = resetPid();
@@ -434,15 +458,26 @@ export default function Page() {
 
   const tcpScreen = tcpToScreen(tcp);
   const userScreen = userToScreen(userWorld);
+  const userEyeScreen = getUserEyeScreen(userWorld);
 
   const desiredTcpX = clamp(userWorld.x - TARGET_STANDOFF_CM, TCP_X_MIN, TCP_X_MAX);
-  const desiredTcpZ = clamp(userWorld.z, TCP_Z_MIN, TCP_Z_MAX);
+  const desiredTcpZ = clamp(getUserEyeWorldZ(userWorld), TCP_Z_MIN, TCP_Z_MAX);
 
   const actualStandoff = userWorld.x - tcp.x;
   const standoffError = actualStandoff - TARGET_STANDOFF_CM;
 
+  const eyeLevelErrorCm = getUserEyeWorldZ(userWorld) - tcp.z;
+
   const atXLimit =
     Math.abs(tcp.x - TCP_X_MIN) < 0.05 || Math.abs(tcp.x - TCP_X_MAX) < 0.05;
+
+  function manualButtonClass(active: boolean) {
+    return `rounded-xl border px-4 py-3 text-sm font-semibold transition ${
+      active
+        ? "border-blue-400 bg-blue-500/20 text-blue-200"
+        : "border-slate-700 bg-slate-900 text-slate-200 hover:border-blue-500 hover:text-blue-300"
+    }`;
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -451,10 +486,9 @@ export default function Page() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight">HeadsUp Arm Simulator</h1>
             <p className="mt-2 text-slate-400">
-              The robot tries to keep the camera 50 cm away from the user.
-              If the user moves too close, the camera moves backward. If the
-              user moves farther away, the camera moves forward, unless the arm
-              hits its workspace limits.
+              Auto mode keeps the camera 35 cm from the user and aligned to the
+              user’s eye height. Manual mode ignores the user and moves the arm
+              only from the control buttons.
             </p>
           </div>
 
@@ -485,8 +519,39 @@ export default function Page() {
           </div>
         </div>
 
+        <div className="mb-6 flex gap-3">
+          <button
+            onClick={() => {
+              setMode("auto");
+              pidRef.current.x = resetPid();
+              pidRef.current.z = resetPid();
+            }}
+            className={`rounded-2xl border px-5 py-3 text-sm font-semibold transition ${
+              mode === "auto"
+                ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300"
+                : "border-slate-700 bg-slate-900 text-slate-300 hover:border-emerald-500/50"
+            }`}
+          >
+            Auto
+          </button>
+
+          <button
+            onClick={() => {
+              setMode("manual");
+              pidRef.current.x = resetPid();
+              pidRef.current.z = resetPid();
+            }}
+            className={`rounded-2xl border px-5 py-3 text-sm font-semibold transition ${
+              mode === "manual"
+                ? "border-blue-500/60 bg-blue-500/15 text-blue-300"
+                : "border-slate-700 bg-slate-900 text-slate-300 hover:border-blue-500/50"
+            }`}
+          >
+            Manual
+          </button>
+        </div>
+
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
-          {/* LEFT COLUMN */}
           <div className="space-y-6">
             <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
               <div className="mb-3 flex items-center gap-2">
@@ -530,13 +595,13 @@ export default function Page() {
                 <circle cx={cameraFace.x} cy={cameraFace.y} r="4" fill="#60a5fa" />
 
                 <text x="12" y="18" fill="#94a3b8" fontSize="12" fontWeight="bold">
-                  Face position from real current camera-user geometry
+                  Face position from current camera-user geometry
                 </text>
               </svg>
 
               <p className="mt-3 text-sm text-slate-400">
-                The face size and offset depend on the actual camera distance and
-                alignment, not on an arbitrary drawing offset.
+                In Auto mode, the robot matches eye height and standoff. In Manual
+                mode, the user can move, but it does not change the arm position.
               </p>
             </div>
 
@@ -613,18 +678,94 @@ export default function Page() {
                   </g>
 
                   <text x="12" y={PAD_H - 10} fill="#64748b" fontSize="11">
-                    Horizontal = distance, Vertical = height
+                    Horizontal = forward/backward, Vertical = body height
                   </text>
                 </svg>
               </div>
             </div>
+
+            <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-semibold">Manual Controls</h2>
+                <div className="text-sm text-slate-400">
+                  {mode === "manual" ? "Enabled" : "Switch to Manual"}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div />
+                <button
+                  onMouseDown={() => mode === "manual" && setManualInput((s) => ({ ...s, up: true }))}
+                  onMouseUp={() => setManualInput((s) => ({ ...s, up: false }))}
+                  onMouseLeave={() => setManualInput((s) => ({ ...s, up: false }))}
+                  onTouchStart={() => mode === "manual" && setManualInput((s) => ({ ...s, up: true }))}
+                  onTouchEnd={() => setManualInput((s) => ({ ...s, up: false }))}
+                  className={manualButtonClass(manualInput.up && mode === "manual")}
+                >
+                  Up
+                </button>
+                <div />
+
+                <button
+                  onMouseDown={() =>
+                    mode === "manual" && setManualInput((s) => ({ ...s, backward: true }))
+                  }
+                  onMouseUp={() => setManualInput((s) => ({ ...s, backward: false }))}
+                  onMouseLeave={() => setManualInput((s) => ({ ...s, backward: false }))}
+                  onTouchStart={() =>
+                    mode === "manual" && setManualInput((s) => ({ ...s, backward: true }))
+                  }
+                  onTouchEnd={() => setManualInput((s) => ({ ...s, backward: false }))}
+                  className={manualButtonClass(manualInput.backward && mode === "manual")}
+                >
+                  Backward
+                </button>
+
+                <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-center text-sm text-slate-400">
+                  Hold buttons
+                </div>
+
+                <button
+                  onMouseDown={() =>
+                    mode === "manual" && setManualInput((s) => ({ ...s, forward: true }))
+                  }
+                  onMouseUp={() => setManualInput((s) => ({ ...s, forward: false }))}
+                  onMouseLeave={() => setManualInput((s) => ({ ...s, forward: false }))}
+                  onTouchStart={() =>
+                    mode === "manual" && setManualInput((s) => ({ ...s, forward: true }))
+                  }
+                  onTouchEnd={() => setManualInput((s) => ({ ...s, forward: false }))}
+                  className={manualButtonClass(manualInput.forward && mode === "manual")}
+                >
+                  Forward
+                </button>
+
+                <div />
+                <button
+                  onMouseDown={() => mode === "manual" && setManualInput((s) => ({ ...s, down: true }))}
+                  onMouseUp={() => setManualInput((s) => ({ ...s, down: false }))}
+                  onMouseLeave={() => setManualInput((s) => ({ ...s, down: false }))}
+                  onTouchStart={() => mode === "manual" && setManualInput((s) => ({ ...s, down: true }))}
+                  onTouchEnd={() => setManualInput((s) => ({ ...s, down: false }))}
+                  className={manualButtonClass(manualInput.down && mode === "manual")}
+                >
+                  Down
+                </button>
+                <div />
+              </div>
+
+              <p className="mt-3 text-sm text-slate-400">
+                Manual mode moves only the TCP. User movement does not affect the arm.
+              </p>
+            </div>
           </div>
 
-          {/* RIGHT COLUMN */}
           <div className="rounded-3xl border border-slate-800 bg-slate-900/70 p-4 shadow-2xl shadow-black/20">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-semibold">Robotic Arm Side View</h2>
-              <div className="text-sm text-slate-400">Robot maintains 50 cm standoff</div>
+              <div className="text-sm text-slate-400">
+                {mode === "auto" ? "Auto tracking at 35 cm and eye height" : "Manual arm control"}
+              </div>
             </div>
 
             <svg
@@ -660,29 +801,63 @@ export default function Page() {
                 />
               ))}
 
-              <line x1="120" y1={GROUND_Y} x2="940" y2={GROUND_Y} stroke="#223247" strokeWidth="3" />
-
-              {/* target 50 cm marker */}
               <line
-                x1={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
-                y1={120}
-                x2={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                x1="120"
+                y1={GROUND_Y}
+                x2="940"
                 y2={GROUND_Y}
-                stroke="#22c55e"
-                strokeDasharray="6 6"
-                strokeWidth="2"
+                stroke="#223247"
+                strokeWidth="3"
               />
-              <text
-                x={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM) - 36}
-                y={108}
-                fill="#86efac"
-                fontSize="12"
-                fontWeight="bold"
-              >
-                50 cm target
-              </text>
 
-              {/* user */}
+              {mode === "auto" && (
+                <>
+                  <line
+                    x1={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                    y1={120}
+                    x2={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM)}
+                    y2={GROUND_Y}
+                    stroke="#22c55e"
+                    strokeDasharray="6 6"
+                    strokeWidth="2"
+                  />
+                  <text
+                    x={worldToScreenX(userWorld.x - TARGET_STANDOFF_CM) - 36}
+                    y={108}
+                    fill="#86efac"
+                    fontSize="12"
+                    fontWeight="bold"
+                  >
+                    35 cm target
+                  </text>
+                </>
+              )}
+
+              {/* Eye-level guide */}
+              {mode === "auto" && (
+                <>
+                  <line
+                    x1="120"
+                    y1={userEyeScreen.y}
+                    x2="940"
+                    y2={userEyeScreen.y}
+                    stroke="#38bdf8"
+                    strokeDasharray="6 6"
+                    strokeWidth="2"
+                    opacity="0.85"
+                  />
+                  <text
+                    x={userEyeScreen.x - 28}
+                    y={userEyeScreen.y - 10}
+                    fill="#7dd3fc"
+                    fontSize="12"
+                    fontWeight="bold"
+                  >
+                    eye level
+                  </text>
+                </>
+              )}
+
               <g transform={`translate(${userScreen.x}, ${userScreen.y})`}>
                 <circle cx="0" cy="-44" r="20" fill="rgba(96,165,250,0.35)" />
                 <rect
@@ -704,11 +879,17 @@ export default function Page() {
                 </text>
               </g>
 
-              {/* base */}
+              {/* Eye center marker */}
+              <circle
+                cx={userEyeScreen.x}
+                cy={userEyeScreen.y}
+                r="4"
+                fill="#93c5fd"
+              />
+
               <rect x={BASE_X - 24} y={BASE_Y + 6} width="48" height="22" rx="5" fill="#111827" />
               <rect x={BASE_X - 16} y={BASE_Y - 48} width="32" height="54" rx="8" fill="#1e293b" />
 
-              {/* upper arm */}
               <line
                 x1={BASE_X}
                 y1={BASE_Y}
@@ -721,7 +902,6 @@ export default function Page() {
               <circle cx={BASE_X} cy={BASE_Y} r="14" fill="#3b82f6" />
               <circle cx={fk.x1} cy={fk.y1} r="12" fill="#3b82f6" />
 
-              {/* forearm */}
               <line
                 x1={fk.x1}
                 y1={fk.y1}
@@ -733,7 +913,6 @@ export default function Page() {
               />
               <circle cx={fk.x2} cy={fk.y2} r="10" fill="#3b82f6" />
 
-              {/* phone/camera */}
               <g transform={`translate(${fk.x2}, ${fk.y2}) rotate(${joints.wrist})`}>
                 <rect x="-18" y="-8" width="36" height="10" rx="3" fill="#1e293b" />
                 <rect
@@ -749,7 +928,7 @@ export default function Page() {
                 <circle cx="0" cy="-31" r="5" fill="#60a5fa" />
               </g>
 
-              {/* actual tcp marker */}
+              {/* Actual TCP marker */}
               <circle
                 cx={tcpScreen.x}
                 cy={tcpScreen.y}
@@ -760,30 +939,32 @@ export default function Page() {
                 strokeWidth="2"
               />
 
-              {/* desired tcp marker */}
-              <circle
-                cx={worldToScreenX(desiredTcpX)}
-                cy={worldToScreenY(desiredTcpZ)}
-                r="9"
-                fill="none"
-                stroke="#22c55e"
-                strokeDasharray="4 4"
-                strokeWidth="2"
-              />
+              {/* Desired TCP marker in auto mode */}
+              {mode === "auto" && (
+                <circle
+                  cx={worldToScreenX(desiredTcpX)}
+                  cy={worldToScreenY(desiredTcpZ)}
+                  r="9"
+                  fill="none"
+                  stroke="#22c55e"
+                  strokeDasharray="4 4"
+                  strokeWidth="2"
+                />
+              )}
 
-              {/* standoff line */}
+              {/* Standoff line to eye center */}
               <line
                 x1={tcpScreen.x}
-                y1={tcpScreen.y - 22}
-                x2={userScreen.x}
-                y2={userScreen.y - 22}
+                y1={tcpScreen.y}
+                x2={userEyeScreen.x}
+                y2={userEyeScreen.y}
                 stroke="#f59e0b"
                 strokeWidth="2"
                 strokeDasharray="6 4"
               />
               <text
-                x={(tcpScreen.x + userScreen.x) / 2 - 28}
-                y={Math.min(tcpScreen.y, userScreen.y) - 30}
+                x={(tcpScreen.x + userEyeScreen.x) / 2 - 28}
+                y={Math.min(tcpScreen.y, userEyeScreen.y) - 12}
                 fill="#fbbf24"
                 fontSize="12"
                 fontWeight="bold"
@@ -792,11 +973,20 @@ export default function Page() {
               </text>
 
               <text x="28" y="32" fill="#94a3b8" fontSize="14" fontWeight="bold">
-                Side-view spacing now matches the real world X/Z physics
+                {mode === "auto"
+                  ? "Auto: robot tracks user eye height and standoff"
+                  : "Manual: user can move, but arm ignores user position"}
               </text>
             </svg>
 
-            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-5">
+            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-7">
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                <div className="text-sm text-slate-500">Mode</div>
+                <div className="mt-1 font-mono text-blue-300">
+                  {mode === "auto" ? "AUTO" : "MANUAL"}
+                </div>
+              </div>
+
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
                 <div className="text-sm text-slate-500">Target Standoff</div>
                 <div className="mt-1 font-mono text-emerald-300">
@@ -819,6 +1009,13 @@ export default function Page() {
               </div>
 
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                <div className="text-sm text-slate-500">Eye Level Error</div>
+                <div className="mt-1 font-mono text-blue-300">
+                  {eyeLevelErrorCm.toFixed(1)} cm
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
                 <div className="text-sm text-slate-500">TCP Position</div>
                 <div className="mt-1 font-mono text-blue-300">
                   X {tcp.x.toFixed(1)} / Z {tcp.z.toFixed(1)}
@@ -835,9 +1032,9 @@ export default function Page() {
             </div>
 
             <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
-              Desired TCP is user.x - 50 cm. If that point is outside the robot
-              workspace, the arm stops at its limit.
-              {atXLimit ? " The arm is currently at an X workspace limit." : ""}
+              {mode === "auto"
+                ? `Desired TCP is user.x - ${TARGET_STANDOFF_CM} cm and user eye height. If that point is outside the workspace, the arm stops at its limit${atXLimit ? ". The arm is currently at an X workspace limit." : "."}`
+                : "Manual mode directly jogs the TCP in X and Z. Forward/backward changes X. Up/down changes Z. User movement does not affect the arm."}
             </div>
           </div>
         </div>
