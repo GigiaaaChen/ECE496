@@ -15,7 +15,7 @@ type TcpPose = {
 
 type JointState = {
   shoulder: number;
-  elbow: number;
+  elbow: number; // signed internal angle, negative = elbow-up branch
   wrist: number;
 };
 
@@ -72,8 +72,13 @@ const L2 = 150;
 // Joint limits
 const SHOULDER_MIN = 5;
 const SHOULDER_MAX = 155;
-const ELBOW_MIN = 12;
-const ELBOW_MAX = 175;
+
+// IMPORTANT:
+// use signed elbow angle so we can choose elbow-up branch.
+// negative elbow => "upper" / opposite-side bend
+const ELBOW_MIN = -175;
+const ELBOW_MAX = -12;
+
 const WRIST_MIN = -120;
 const WRIST_MAX = 120;
 
@@ -154,7 +159,8 @@ function tcpToScreen(tcp: TcpPose) {
   };
 }
 
-// Robust IK target from tcp
+// IK target from tcp
+// Fixed to use ELBOW-UP / opposite branch
 function solveIkFromTcp(tcp: TcpPose): JointState {
   const target = tcpToScreen(tcp);
 
@@ -172,7 +178,10 @@ function solveIkFromTcp(tcp: TcpPose): JointState {
     -1,
     1
   );
-  const elbowRad = Math.acos(cosElbow);
+
+  // CHANGED:
+  // Use the opposite IK branch so the arm bends the other way ("upward")
+  const elbowRad = -Math.acos(cosElbow);
 
   const shoulderRad =
     Math.atan2(ly, lx) -
@@ -202,6 +211,7 @@ function forwardKinematics(j: JointState) {
   const x1 = BASE_X - L1 * Math.cos(s);
   const y1 = BASE_Y - L1 * Math.sin(s);
 
+  // With signed elbow, this naturally draws the selected branch.
   const x2 = x1 - L2 * Math.cos(s + e);
   const y2 = y1 - L2 * Math.sin(s + e);
 
@@ -248,7 +258,7 @@ export default function Page() {
   // actually drawn arm joints
   const [joints, setJoints] = useState<JointState>({
     shoulder: 42,
-    elbow: 88,
+    elbow: -88,
     wrist: 0,
   });
 
@@ -333,7 +343,7 @@ export default function Page() {
 
     setJoints({
       shoulder: 42,
-      elbow: 88,
+      elbow: -88,
       wrist: 0,
     });
 
@@ -690,7 +700,7 @@ export default function Page() {
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
                 <div className="text-sm text-slate-500">Joint Angles</div>
                 <div className="mt-1 font-mono text-blue-300">
-                  S {joints.shoulder.toFixed(1)}° / E {joints.elbow.toFixed(1)}° / W{" "}
+                  S {joints.shoulder.toFixed(1)}° / E {Math.abs(joints.elbow).toFixed(1)}° / W{" "}
                   {joints.wrist.toFixed(1)}°
                 </div>
               </div>
