@@ -107,7 +107,6 @@ const SCREEN_Y_TOP = 110;
 const SCREEN_Y_BOTTOM = 440;
 
 // In the user drawing, the head/eye center is 44 px above userScreen.y.
-// Convert that to world cm so TCP can target the same physical level.
 const USER_EYE_OFFSET_PX = 44;
 const PX_PER_CM_Y =
   (SCREEN_Y_BOTTOM - SCREEN_Y_TOP) / (WORLD_Z_MAX - WORLD_Z_MIN);
@@ -336,7 +335,6 @@ export default function Page() {
           TCP_X_MAX
         );
 
-        // Revised: target eye level, not body anchor level
         const desiredTcpZ = clamp(
           getUserEyeWorldZ(userWorld),
           TCP_Z_MIN,
@@ -464,9 +462,6 @@ export default function Page() {
   const desiredTcpZ = clamp(getUserEyeWorldZ(userWorld), TCP_Z_MIN, TCP_Z_MAX);
 
   const actualStandoff = userWorld.x - tcp.x;
-  const standoffError = actualStandoff - TARGET_STANDOFF_CM;
-
-  const eyeLevelErrorCm = getUserEyeWorldZ(userWorld) - tcp.z;
 
   const atXLimit =
     Math.abs(tcp.x - TCP_X_MIN) < 0.05 || Math.abs(tcp.x - TCP_X_MAX) < 0.05;
@@ -833,7 +828,6 @@ export default function Page() {
                 </>
               )}
 
-              {/* Eye-level guide */}
               {mode === "auto" && (
                 <>
                   <line
@@ -879,7 +873,6 @@ export default function Page() {
                 </text>
               </g>
 
-              {/* Eye center marker */}
               <circle
                 cx={userEyeScreen.x}
                 cy={userEyeScreen.y}
@@ -928,7 +921,6 @@ export default function Page() {
                 <circle cx="0" cy="-31" r="5" fill="#60a5fa" />
               </g>
 
-              {/* Actual TCP marker */}
               <circle
                 cx={tcpScreen.x}
                 cy={tcpScreen.y}
@@ -939,7 +931,6 @@ export default function Page() {
                 strokeWidth="2"
               />
 
-              {/* Desired TCP marker in auto mode */}
               {mode === "auto" && (
                 <circle
                   cx={worldToScreenX(desiredTcpX)}
@@ -952,7 +943,6 @@ export default function Page() {
                 />
               )}
 
-              {/* Standoff line to eye center */}
               <line
                 x1={tcpScreen.x}
                 y1={tcpScreen.y}
@@ -979,7 +969,7 @@ export default function Page() {
               </text>
             </svg>
 
-            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-7">
+            <div className="mt-4 grid grid-cols-2 gap-4 xl:grid-cols-3">
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
                 <div className="text-sm text-slate-500">Mode</div>
                 <div className="mt-1 font-mono text-blue-300">
@@ -998,35 +988,6 @@ export default function Page() {
                 <div className="text-sm text-slate-500">Actual Standoff</div>
                 <div className="mt-1 font-mono text-blue-300">
                   {actualStandoff.toFixed(1)} cm
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">Standoff Error</div>
-                <div className="mt-1 font-mono text-blue-300">
-                  {standoffError.toFixed(1)} cm
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">Eye Level Error</div>
-                <div className="mt-1 font-mono text-blue-300">
-                  {eyeLevelErrorCm.toFixed(1)} cm
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">TCP Position</div>
-                <div className="mt-1 font-mono text-blue-300">
-                  X {tcp.x.toFixed(1)} / Z {tcp.z.toFixed(1)}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="text-sm text-slate-500">Joint Angles</div>
-                <div className="mt-1 font-mono text-blue-300">
-                  S {joints.shoulder.toFixed(1)}° / E {Math.abs(joints.elbow).toFixed(1)}° / W{" "}
-                  {joints.wrist.toFixed(1)}°
                 </div>
               </div>
             </div>
