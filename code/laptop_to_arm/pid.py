@@ -28,23 +28,31 @@ FD_XML = r"models/face-detection-retail-0004.xml"
 LM_XML = r"models/landmarks-regression-retail-0009.xml"
 
 # Preferred devices (fallback to CPU automatically)
-DEVICE_FD = "CPU"
-DEVICE_LM = "CPU"
+DEVICE_FD = "NPU"
+DEVICE_LM = "NPU"
 
 # --- Socket Server ---
 SOCKET_HOST = "0.0.0.0"
 SOCKET_PORT = 5000
+SOCKET_BACKLOG = 5
+SOCKET_ACCEPT_TIMEOUT = 1.0
+SOCKET_RECV_TIMEOUT = 2.0
+SOCKET_BUFFER_SIZE = 1024
+TCP_IDLE_TIMEOUT_SEC = 8.0         # if no valid message for too long, close client
+TCP_HEARTBEAT_REPLY = True         # reply to PING with PONG
+PRINT_TCP_RAW = True               # print raw incoming TCP lines
+PRINT_TCP_ACK = True               # print ACK/ERR replies sent back
 
 # --- Serial / RoArm ---
-SERIAL_PORT = "COM3"
+SERIAL_PORT = "/dev/ttyUSB0"
 BAUDRATE = 115200
 
 # --- Camera ---
-CAM_SOURCE = 1
-CAM_BACKEND = cv2.CAP_DSHOW
+CAM_SOURCE = "/dev/v4l/by-path/platform-xhci-hcd.2.auto-usb-0:1.3:1.0-video-index0"
+CAM_BACKEND = cv2.CAP_V4L2			
 CAM_W = 640
 CAM_H = 480
-CAM_FPS = 30
+CAM_FPS = 30				
 USE_MJPG = True
 MIRROR_VIEW = True
 
@@ -99,7 +107,7 @@ MIN_FACE_AREA_FRAC = 0.015
 
 # Camera model
 FOV_DEG = 145.0                    # spec provided by you
-DIST_SCALE = 2.0                   # extra multiplier if you want later fine tuning
+DIST_SCALE = 2.1	                   # extra multiplier if you want later fine tuning
 
 # Where you want the user's head center to appear in the frame.
 # Since the camera is below the phone, you'll likely want AIM_CENTER_Y_NORM < 0.50
@@ -114,7 +122,7 @@ AIM_CENTER_Y_NORM = 0.40
 X0, Y0, Z0 = 235.0, 0.0, 234.0
 T_NEUTRAL = 3.14
 
-X_MIN, X_MAX = 120.0, 350.0
+X_MIN, X_MAX = 140.0, 330.0
 Y_MIN, Y_MAX = -150.0, 150.0
 Z_MIN, Z_MAX = 100.0, 320.0
 
@@ -155,6 +163,9 @@ class SystemState:
         self.system_ready = False
         self.status_text = "BOOTING"
         self.lock = threading.Lock()
+        self.tcp_connected = False
+        self.tcp_client_addr = None
+        self.last_tcp_rx_time = 0.0
 
 state = SystemState()
 
@@ -183,21 +194,108 @@ def write_json(ser, obj):
         print("SEND:", line)
 
 def set_status(msg):
+    should_print = False
     with state.lock:
-        state.status_text = msg
-    print(f"[STATUS] {msg}")
+        if state.status_text != msg:
+            state.status_text = msg
+            should_print = True
+    if should_print:
+        print(f"[STATUS] {msg}")
+
+def configure_server_socket(server):
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    # Low-latency small command packets
+    try:
+        server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
+    server.settimeout(SOCKET_ACCEPT_TIMEOUT)
+
+
+def configure_client_socket(conn):
+    conn.settimeout(SOCKET_RECV_TIMEOUT)
+
+    try:
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
+    # TCP keepalive so dead clients are detected better
+    try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except Exception:
+        pass
+
+    # Linux-specific keepalive tuning (RDK side should support these)
+    try:
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except Exception:
+        pass
+
+
+def send_tcp_reply(conn, msg: str):
+    if not msg.endswith("\n"):
+        msg += "\n"
+    conn.sendall(msg.encode("utf-8"))
+    if PRINT_TCP_ACK:
+        print(f"[TCP TX] {msg.strip()}")
 
 # ============================================================
-# SOCKET SERVER THREAD
+# SOCKET SERVER THREAD (ACK + ALWAYS-ALIVE + BETTER PARSING)
 # ============================================================
 
-def handle_socket_command(cmd: str):
+TCP_ACCEPT_TIMEOUT_SEC = 1.0
+TCP_CLIENT_TIMEOUT_SEC = 2.0
+TCP_IDLE_DISCONNECT_SEC = 8.0
+TCP_RECV_SIZE = 1024
+
+VALID_COMMANDS = {
+    "AUTO", "MANUAL", "LOCK", "UNLOCK", "PAUSE", "RESUME",
+    "RIGHT", "LEFT", "FORWARD", "BACKWARD", "STOP", "UP", "DOWN",
+    "PING", "HEARTBEAT", "KEEPALIVE"
+}
+
+def set_tcp_connection(is_connected, addr=None):
+    with state.lock:
+        state.tcp_connected = is_connected
+        state.tcp_client_addr = addr if is_connected else None
+        if is_connected:
+            state.last_tcp_rx_time = time.time()
+
+def touch_tcp_rx():
+    with state.lock:
+        state.last_tcp_rx_time = time.time()
+
+def send_tcp_reply(conn, msg: str):
+    try:
+        if not msg.endswith("\n"):
+            msg += "\n"
+        conn.sendall(msg.encode("utf-8"))
+        if PRINT_TCP_ACK:
+            print(f"[TCP TX] {msg.strip()}")
+    except Exception as e:
+        print(f"[TCP TX] Failed to send reply: {e}")
+
+def handle_socket_command(cmd: str, conn=None):
     cmd = cmd.strip().upper()
     if not cmd:
-        return
+        return False
 
-    if PRINT_DEBUG:
-        print(f"[SOCKET] Parsed command: {cmd}")
+    if PRINT_TCP_RAW:
+        print(f"[TCP RX CMD] {repr(cmd)}")
+
+    touch_tcp_rx()
+
+    if cmd in ["PING", "HEARTBEAT", "KEEPALIVE"]:
+        if TCP_HEARTBEAT_REPLY and conn is not None:
+            send_tcp_reply(conn, "PONG")
+        return True
+
+    handled = True
 
     with state.lock:
         if cmd == "AUTO":
@@ -215,38 +313,156 @@ def handle_socket_command(cmd: str):
         elif cmd in ["RIGHT", "LEFT", "FORWARD", "BACKWARD", "STOP", "UP", "DOWN"]:
             state.gyro_cmd = cmd
             state.last_cmd_time = time.time()
+        else:
+            handled = False
+
+    if conn is not None:
+        if handled:
+            send_tcp_reply(conn, f"ACK:{cmd}")
+        else:
+            send_tcp_reply(conn, f"ERR:{cmd}")
+
+    if handled:
+        print(f"[SOCKET] Handled command: {cmd}")
+    else:
+        print(f"[SOCKET] Unknown command: {cmd}")
+
+    return handled
+
+def process_recv_buffer(recv_buffer, conn):
+    """
+    Returns updated recv_buffer after processing as many commands as possible.
+    Accepts either:
+      - newline-separated commands: 'LOCK\\nUNLOCK\\n'
+      - single raw packets: 'LEFT'
+      - CRLF packets from some clients
+    """
+    # normalize CRLF -> LF
+    recv_buffer = recv_buffer.replace("\r", "\n")
+
+    # process all newline-terminated lines first
+    while "\n" in recv_buffer:
+        line, recv_buffer = recv_buffer.split("\n", 1)
+        line = line.strip()
+        if line:
+            handle_socket_command(line, conn)
+
+    # if leftover buffer is itself exactly one valid token, process it immediately
+    stripped = recv_buffer.strip().upper()
+    if stripped in VALID_COMMANDS:
+        handle_socket_command(stripped, conn)
+        recv_buffer = ""
+
+    return recv_buffer
 
 def socket_server_thread():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((SOCKET_HOST, SOCKET_PORT))
-    server.listen(1)
-    print(f"[SOCKET] Server listening on {SOCKET_HOST}:{SOCKET_PORT}")
-
     while True:
-        conn = None
-        conn_file = None
+        server = None
         try:
-            conn, addr = server.accept()
-            print(f"[SOCKET] Connected by {addr}")
-            conn_file = conn.makefile("r")
-            for line in conn_file:
-                handle_socket_command(line)
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+            try:
+                server.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+                server.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+                server.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except Exception:
+                pass
+
+            server.bind((SOCKET_HOST, SOCKET_PORT))
+            server.listen(SOCKET_BACKLOG)
+            server.settimeout(TCP_ACCEPT_TIMEOUT_SEC)
+
+            print(f"[SOCKET] Always-alive server listening on {SOCKET_HOST}:{SOCKET_PORT}")
+
+            while True:
+                conn = None
+                addr = None
+
+                try:
+                    try:
+                        conn, addr = server.accept()
+                    except socket.timeout:
+                        continue
+
+                    print(f"[SOCKET] Connected by {addr}")
+                    conn.settimeout(TCP_CLIENT_TIMEOUT_SEC)
+
+                    try:
+                        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        try:
+                            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+                            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+                            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    set_tcp_connection(True, addr)
+                    recv_buffer = ""
+
+                    # optional greeting so client knows server is ready
+                    send_tcp_reply(conn, "ACK:CONNECTED")
+
+                    while True:
+                        try:
+                            data = conn.recv(TCP_RECV_SIZE)
+
+                            if not data:
+                                print("[SOCKET] Client closed connection")
+                                break
+
+                            decoded = data.decode("utf-8", errors="ignore")
+                            if PRINT_TCP_RAW:
+                                print(f"[TCP RX RAW] {repr(decoded)}")
+
+                            touch_tcp_rx()
+                            recv_buffer += decoded
+                            recv_buffer = process_recv_buffer(recv_buffer, conn)
+
+                        except socket.timeout:
+                            with state.lock:
+                                idle_for = time.time() - state.last_tcp_rx_time
+
+                            if idle_for > TCP_IDLE_DISCONNECT_SEC:
+                                print(f"[SOCKET] Client idle timeout ({idle_for:.1f}s), disconnecting")
+                                break
+
+                            continue
+
+                        except ConnectionResetError:
+                            print("[SOCKET] Connection reset by peer")
+                            break
+
+                        except Exception as e:
+                            print(f"[SOCKET] Client loop error: {e}")
+                            break
+
+                except Exception as e:
+                    print(f"[SOCKET] Accept/client error: {e}")
+
+                finally:
+                    set_tcp_connection(False)
+                    try:
+                        if conn is not None:
+                            conn.close()
+                    except Exception:
+                        pass
+                    print("[SOCKET] Waiting for next client...")
+
         except Exception as e:
-            print(f"[SOCKET] Error: {e}")
+            print(f"[SOCKET] Server fatal error, recreating socket: {e}")
+            time.sleep(1.0)
+
         finally:
             try:
-                if conn_file is not None:
-                    conn_file.close()
+                if server is not None:
+                    server.close()
             except Exception:
                 pass
-            try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
-            print("[SOCKET] Client disconnected")
-
 # ============================================================
 # DATA TYPES
 # ============================================================
@@ -748,7 +964,7 @@ def main():
             system_ready = state.system_ready
             status_text = state.status_text
 
-        if current_mode == "MANUAL" and (time.time() - last_cmd_time > 0.25):
+        if current_mode == "MANUAL" and (time.time() - last_cmd_time > 0.65):
             current_gyro_cmd = "STOP"
             with state.lock:
                 state.gyro_cmd = "STOP"
